@@ -93,6 +93,89 @@ impl IStreamGetSize_Impl for InFileStream_Impl {
     }
 }
 
+/// Numbered split volumes (`a.7z.001`, `a.7z.002` …) read as one seekable stream, so the
+/// archive inside opens in place instead of being joined to disk first.
+#[implement(IInStream, IStreamGetSize)]
+pub struct MultiVolumeStream {
+    parts: Vec<(File, u64)>, // (volume, offset of its first byte)
+    total: u64,
+    position: Mutex<u64>,
+}
+
+impl MultiVolumeStream {
+    pub fn open(paths: &[String]) -> Option<(IInStream, u64)> {
+        let mut parts = Vec::with_capacity(paths.len());
+        let mut total = 0u64;
+        for (i, path) in paths.iter().enumerate() {
+            let file = open_input(path, i > 0)?;
+            let len = file.metadata().ok()?.len();
+            parts.push((file, total));
+            total = total.checked_add(len)?;
+        }
+        Some((MultiVolumeStream { parts, total, position: Mutex::new(0) }.into(), total))
+    }
+}
+
+impl ISequentialInStream_Impl for MultiVolumeStream_Impl {
+    unsafe fn Read(&self, data: *mut c_void, size: u32, processed: *mut u32) -> HRESULT {
+        if !processed.is_null() {
+            *processed = 0;
+        }
+        let mut position = self.position.lock().unwrap();
+        if size == 0 || *position >= self.total {
+            return S_OK;
+        }
+        let index = self.parts.partition_point(|(_, start)| *start <= *position) - 1;
+        let (file, start) = &self.parts[index];
+        let end = self.parts.get(index + 1).map_or(self.total, |(_, next)| *next);
+        let want = (size as u64).min(end - *position) as usize;
+        let buffer = std::slice::from_raw_parts_mut(data as *mut u8, want);
+        let mut file = file;
+        let result = file.seek(SeekFrom::Start(*position - start)).and_then(|_| file.read(buffer));
+        match result {
+            Ok(n) => {
+                *position += n as u64;
+                if !processed.is_null() {
+                    *processed = n as u32;
+                }
+                S_OK
+            }
+            Err(e) => io_hr(&e),
+        }
+    }
+}
+
+impl IInStream_Impl for MultiVolumeStream_Impl {
+    unsafe fn Seek(&self, offset: i64, origin: u32, new_position: *mut u64) -> HRESULT {
+        let mut position = self.position.lock().unwrap();
+        let base = match origin {
+            0 => 0i128,
+            1 => *position as i128,
+            2 => self.total as i128,
+            _ => return E_INVALIDARG,
+        };
+        let target = base + offset as i128;
+        if target < 0 {
+            return hr_from_win32(131); // ERROR_NEGATIVE_SEEK
+        }
+        *position = target.min(u64::MAX as i128) as u64;
+        if !new_position.is_null() {
+            *new_position = *position;
+        }
+        S_OK
+    }
+}
+
+impl IStreamGetSize_Impl for MultiVolumeStream_Impl {
+    unsafe fn GetSize(&self, size: *mut u64) -> HRESULT {
+        if size.is_null() {
+            return E_POINTER;
+        }
+        *size = self.total;
+        S_OK
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Output stream
 // ---------------------------------------------------------------------------
@@ -197,6 +280,19 @@ pub struct OpenCallback {
     first_volume: String,
     password: Option<Arc<ArchivePassword>>,
     pub state: Arc<Mutex<OpenState>>,
+}
+
+impl OpenState {
+    /// Record a source volume read outside the open callback (a numbered split set).
+    pub fn record(&mut self, path: &str) {
+        if !self.opened_volumes.iter().any(|v| v == path) {
+            self.opened_volumes.push(path.to_string());
+            let identity = crate::win::capture_identity(path);
+            if identity.valid {
+                self.identities.push(identity);
+            }
+        }
+    }
 }
 
 impl OpenCallback {

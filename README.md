@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/sliots/Unbox/releases">
-    <img src="https://img.shields.io/badge/Version-v2.0.6-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
+    <img src="https://img.shields.io/badge/Version-v2.0.7-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
   </a>
   <img src="https://img.shields.io/badge/Platform-Windows_11_%7C_10-0078D4?style=for-the-badge&logo=windows&labelColor=000000" alt="Platform">
   <img src="https://img.shields.io/badge/Core-Rust_%7C_Slint-B7410E?style=for-the-badge&logo=rust&labelColor=000000" alt="Core">
@@ -43,6 +43,7 @@
 | 文件关联 | PowerShell 脚本 + `安装与卸载.cmd` | `unbox register / unregister / status`，图标内嵌在 exe 中 |
 | 分发 | 手动下载便携包 | GitHub Actions 自动构建、测试、发布；**支持 Scoop 安装** |
 | 套娃压缩包 | — | 解出来只有一个文件且按内容判断是压缩包（不看后缀名，跳过 docx / apk 等文档与安装包）时继续解开，最多 4 层；内层压缩包与源包同等对待：默认保留在解压结果里，勾选“移入回收站”时一并回收 |
+| 分卷 | — | `.7z.001` / `.zip.001` 等编号分卷**直接跨卷读取**，不再先拼出一份完整副本；打开任意一卷（`.002`、`.part3.rar`、`.z01`、`.r00`）都会从首卷开始；缺卷时直接指出缺的是哪一卷；勾选“移入回收站”时回收全部分卷 |
 | 命令行 | — | `unbox extract <压缩包>` 无窗口解压（同一条校验与提交路径） |
 | 密码 | 手动输入 | **先自动尝试**压缩包名、逐级向上每一层文件夹名及其按空格拆出的词，猜中直接解压；都不对再询问，输错可重试 |
 
@@ -93,7 +94,7 @@ scoop install https://raw.githubusercontent.com/sliots/Unbox/rust/bucket/unbox.j
 
 ### 便携包
 
-从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.6-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
+从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.7-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
 
 ```powershell
 .\unbox.exe register      # 登记关联并打开“默认应用”设置
@@ -117,7 +118,7 @@ unbox extract D:\Downloads\project.7z --password secret
 | 分类 | 扩展名 |
 |:---|:---|
 | **常用归档** | `.zip` `.zipx` `.7z` `.rar` `.tar` `.ova` `.lzh` `.lha` `.cab` `.arj` |
-| **分卷入口** | `.r00` `.001` |
+| **分卷入口** | `.001`（`.7z.001` `.zip.001` 等）`.part1.rar` `.r00` `.z01` |
 | **发行包与系统归档** | `.deb` `.rpm` `.cpio` `.xar` `.xip` |
 | **映像与虚拟磁盘** | `.wim` `.swm` `.esd` `.dmg` `.squashfs` `.vmdk` `.vdi` `.qcow` `.qcow2` `.fat` `.ntfs` |
 
@@ -143,7 +144,7 @@ unbox extract D:\Downloads\project.7z --password secret
 cargo build --release -p unbox            # target\release\unbox.exe
 copy assets\7z.dll target\release\        # 7z.dll 需与 unbox.exe 同目录
 .\scripts\package.ps1                     # 生成 dist\Unbox-v<版本>-win-x64.zip 与 SHA256SUMS.txt
-.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.6-win-x64
+.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.7-win-x64
 ```
 
 在 macOS / Linux 上交叉编译（需要 LLVM 提供 `clang-cl`、`llvm-rc`，首次会自动下载 MSVC CRT 与 Windows SDK）：
@@ -170,7 +171,7 @@ bucket/unbox.json   Scoop 清单（发布时由 CI 自动更新版本与哈希�
 - **发布**（`.github/workflows/release.yml`）：推送与 `Cargo.toml` 版本一致的标签即可：
 
   ```bash
-  git tag v2.0.6 && git push origin v2.0.6
+  git tag v2.0.7 && git push origin v2.0.7
   ```
 
   工作流会构建、测试、创建 GitHub Release（zip + SHA256SUMS.txt），并把新版本号与哈希写回 `rust` 分支的 `bucket/unbox.json`。

@@ -125,8 +125,91 @@ pub fn is_same_volume_family(first: &Path, other: &Path) -> bool {
     false
 }
 
+fn all_digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The numbered split set that `first` (`a.7z.001`) opens, in order, picked from the
+/// names in its directory. `None` when `first` is not a `.001` volume; `Err(n)` is the
+/// number of the first volume missing below the highest one present.
+pub fn numbered_volumes(first: &str, siblings: &[String]) -> Option<Result<Vec<String>, u32>> {
+    let stem = strip_suffix_ignore_ascii_case(first, ".001")?;
+    let mut found = std::collections::BTreeMap::new();
+    for name in siblings {
+        if name.len() <= stem.len() + 1 || !name.is_char_boundary(stem.len()) {
+            continue;
+        }
+        let (head, tail) = name.split_at(stem.len());
+        let Some(number) = tail.strip_prefix('.') else { continue };
+        if !eq_ignore_case(head, stem) || number.len() < 3 || !all_digits(number) {
+            continue;
+        }
+        if let Ok(n @ 2..) = number.parse::<u32>() {
+            found.entry(n).or_insert_with(|| name.clone());
+        }
+    }
+    let last = found.keys().next_back().copied().unwrap_or(1);
+    let mut volumes = vec![first.to_string()];
+    for n in 2..=last {
+        match found.remove(&n) {
+            Some(name) => volumes.push(name),
+            None => return Some(Err(n)),
+        }
+    }
+    Some(Ok(volumes))
+}
+
+/// For a later volume of a set (`a.7z.003`, `a.part2.rar`, `a.z01`, `a.r00`), the name
+/// of the volume that opens the set, when `exists` confirms it.
+pub fn first_volume_name(file_name: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
+    let dot = file_name.rfind('.')?;
+    let (stem, ext) = (&file_name[..dot], &file_name[dot + 1..]);
+    let lower = ext.to_ascii_lowercase();
+    let candidate = if ext.len() >= 3 && all_digits(ext) {
+        (ext.parse::<u32>().ok()? > 1).then(|| format!("{stem}.{:0width$}", 1, width = ext.len()))?
+    } else if lower.len() >= 3 && lower.starts_with('z') && all_digits(&lower[1..]) {
+        format!("{stem}.zip")
+    } else if lower.len() == 3 && lower.starts_with('r') && all_digits(&lower[1..]) {
+        format!("{stem}.rar")
+    } else if lower == "rar" {
+        let pos = stem.to_ascii_lowercase().rfind(".part")?;
+        let number = &stem[pos + 5..];
+        if !all_digits(number) || number.parse::<u32>().ok()? <= 1 {
+            return None;
+        }
+        format!("{}.part{:0width$}.{ext}", &stem[..pos], 1, width = number.len())
+    } else {
+        return None;
+    };
+    exists(&candidate).then_some(candidate)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numbered_volume_sets() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let dir = names(&["a.7z.001", "A.7Z.002", "a.7z.003", "a.7z.003.txt", "b.7z.002", "a.7z.01"]);
+        assert_eq!(numbered_volumes("a.7z.001", &dir), Some(Ok(names(&["a.7z.001", "A.7Z.002", "a.7z.003"]))));
+        assert_eq!(numbered_volumes("a.7z.001", &names(&["a.7z.001", "a.7z.002", "a.7z.004"])), Some(Err(3)));
+        assert_eq!(numbered_volumes("solo.001", &names(&["solo.001"])), Some(Ok(names(&["solo.001"]))));
+        assert_eq!(numbered_volumes("a.7z", &dir), None);
+    }
+
+    #[test]
+    fn first_volume_of_a_set() {
+        let present = ["a.7z.001", "b.zip", "c.rar", "d.part01.rar", "e.0001"];
+        let exists = |n: &str| present.contains(&n);
+        assert_eq!(first_volume_name("a.7z.003", exists).as_deref(), Some("a.7z.001"));
+        assert_eq!(first_volume_name("e.0002", exists).as_deref(), Some("e.0001"));
+        assert_eq!(first_volume_name("b.z01", exists).as_deref(), Some("b.zip"));
+        assert_eq!(first_volume_name("c.r00", exists).as_deref(), Some("c.rar"));
+        assert_eq!(first_volume_name("d.part07.rar", exists).as_deref(), Some("d.part01.rar"));
+        assert_eq!(first_volume_name("a.7z.001", exists), None);
+        assert_eq!(first_volume_name("d.part01.rar", exists), None);
+        assert_eq!(first_volume_name("x.7z.002", exists), None);
+        assert_eq!(first_volume_name("plain.rar", exists), None);
+    }
 
     #[test]
     fn unique_file_names() {

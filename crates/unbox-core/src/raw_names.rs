@@ -123,6 +123,20 @@ pub fn sniff_archive(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// Total size a 7z archive declares in its start header (signature header plus the
+/// offset and size of the end header), to tell a split set that lacks its last volumes.
+pub fn sevenzip_declared_size(head: &[u8]) -> Option<u64> {
+    if head.len() < 32 || !head.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
+        return None;
+    }
+    let field = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().unwrap());
+    let (offset, size) = (field(12), field(20));
+    if offset == 0 && size == 0 {
+        return None;
+    }
+    32u64.checked_add(offset)?.checked_add(size)
+}
+
 fn parse_octal(p: &[u8]) -> u64 {
     if !p.is_empty() && p[0] & 0x80 != 0 {
         return p[1..].iter().fold((p[0] & 0x7F) as u64, |v, b| (v << 8) | *b as u64);
@@ -362,6 +376,17 @@ pub fn read_raw_names(path: &Path) -> Option<Vec<RawEntry>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sevenzip_size_from_start_header() {
+        let mut head = vec![0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0, 4];
+        head.extend_from_slice(&[0; 4]); // start header CRC
+        head.extend_from_slice(&1000u64.to_le_bytes());
+        head.extend_from_slice(&90u64.to_le_bytes());
+        head.extend_from_slice(&[0; 4]);
+        assert_eq!(super::sevenzip_declared_size(&head), Some(1122));
+        assert_eq!(super::sevenzip_declared_size(&head[..20]), None);
+        assert_eq!(super::sevenzip_declared_size(b"PK\x03\x04"), None);
+    }
 
     #[test]
     fn sniff_by_content_not_name() {

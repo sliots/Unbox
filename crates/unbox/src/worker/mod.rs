@@ -498,6 +498,42 @@ fn write_manifest(path: &str, delivery_root: &str, items: &[DeliveredItem]) -> b
     serde_json::to_writer(&mut file, &manifest).is_ok() && file.flush().is_ok() && file.sync_all().is_ok()
 }
 
+/// The volumes of a numbered split set (`a.7z.001` …) whose first volume holds an
+/// archive, with that archive's handler. `Ok(None)`: a plain split file, joined to disk
+/// by the Split handler. `Err`: the set is visibly incomplete.
+fn split_volumes(first: &str, leaf: &str) -> Result<Option<(Vec<String>, &'static str)>, String> {
+    let dir = match first.rfind(['\\', '/']) {
+        Some(slash) => &first[..=slash],
+        None => "",
+    };
+    let siblings: Vec<String> = std::fs::read_dir(if dir.is_empty() { "." } else { dir })
+        .map(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    let stem = &leaf[..leaf.len().saturating_sub(4)];
+    let names = match unbox_core::naming::numbered_volumes(leaf, &siblings) {
+        None => return Ok(None),
+        Some(Err(n)) => {
+            return Err(format!("缺少分卷「{stem}.{n:03}」。请把全部分卷放在同一文件夹后重试，源压缩包已保留。"));
+        }
+        Some(Ok(names)) => names,
+    };
+    let Some(hint @ ("7z" | "Rar5" | "Rar" | "zip")) = sniff_archive(Path::new(first)) else { return Ok(None) };
+    let paths: Vec<String> = names.iter().map(|n| format!("{dir}{n}")).collect();
+    if hint == "7z" {
+        let mut head = [0u8; 32];
+        let declared = std::fs::File::open(first)
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
+            .ok()
+            .and_then(|_| unbox_core::raw_names::sevenzip_declared_size(&head));
+        let total: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        if declared.is_some_and(|size| size > total) {
+            let next = format!("{stem}.{:03}", names.len() + 1);
+            return Err(format!("分卷不完整：缺少「{next}」及之后的分卷。请把全部分卷放在同一文件夹后重试，源压缩包已保留。"));
+        }
+    }
+    Ok(Some((paths, hint)))
+}
+
 // ---------------------------------------------------------------------------
 // Main flow
 // ---------------------------------------------------------------------------
@@ -537,21 +573,57 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         return 2;
     };
 
-    let Some(stream) = InFileStream::open(&args.archive, false) else {
-        error(format!("Cannot open archive file: {}", args.archive), None);
-        return 3;
-    };
     let guesses = unbox_core::password::guesses(Path::new(&args.archive));
     let password = Arc::new(ArchivePassword::with_guesses(guesses.clone()));
 
     let leaf = Path::new(&args.archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let route = classify(&leaf);
     let compound_tar = route.kind == ArchiveKind::TarWrapper;
-    let split = route.kind == ArchiveKind::Split;
-    let ext = Path::new(&args.archive).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let mut split = route.kind == ArchiveKind::Split;
+    let mut ext = Path::new(&args.archive).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let mut hints = route.handler_hints.clone();
+    let mut volumes = Vec::new();
+    if split {
+        match split_volumes(&args.archive, &leaf) {
+            Ok(Some((set, hint))) => {
+                // An archive split into numbered volumes opens in place, read across the
+                // volumes; only a plain split file is joined to disk.
+                ext = Path::new(&leaf)
+                    .file_stem()
+                    .and_then(|s| Path::new(s).extension())
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
+                hints = vec![hint.to_string()];
+                volumes = set;
+                split = false;
+            }
+            Ok(None) => {}
+            Err(message) => {
+                error(message, None);
+                return 5;
+            }
+        }
+    }
+    let stream = if volumes.is_empty() {
+        InFileStream::open(&args.archive, false)
+    } else {
+        MultiVolumeStream::open(&volumes).map(|(stream, _)| stream)
+    };
+    let Some(stream) = stream else {
+        error(format!("Cannot open archive file: {}", args.archive), None);
+        return 3;
+    };
     let open_cp = if args.code_page != 0 { args.code_page } else { default_archive_code_page() };
-    let opened =
-        open_with_password(&lib, &stream, &args.archive, &ext, open_cp, &route.handler_hints, compound_tar || split, Some(&password));
+    let opened = open_with_password(
+        &lib,
+        &stream,
+        &args.archive,
+        &ext,
+        open_cp,
+        &hints,
+        compound_tar || split || !volumes.is_empty(),
+        Some(&password),
+    );
     let Opened { archive, handler, callback: open_cb, state: open_state } = match opened {
         Ok(opened) => opened,
         Err(OpenFailure::Canceled) => {
@@ -563,6 +635,13 @@ pub fn run(raw_args: &[OsString]) -> i32 {
             return 4;
         }
     };
+
+    {
+        let mut state = open_state.lock().unwrap();
+        for volume in volumes.iter().skip(1) {
+            state.record(volume);
+        }
+    }
 
     let close = |archive: &IInArchive| unsafe {
         let _ = archive.Close();

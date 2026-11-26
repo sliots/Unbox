@@ -44,6 +44,7 @@ pub fn extract_cli(args: &[std::ffi::OsString]) -> i32 {
         eprintln!("找不到压缩包。\n{USAGE}");
         return 1;
     };
+    let archive = plan::first_volume(&archive);
     let plan = ExtractionPlan::new(&archive);
     if let Err(e) = std::fs::create_dir_all(&plan.staging) {
         eprintln!("无法创建暂存目录：{e}");

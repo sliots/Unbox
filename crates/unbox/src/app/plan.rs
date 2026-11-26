@@ -35,6 +35,15 @@ pub fn unique_target(parent: &str, base: &str) -> String {
     unique_target_directory(Path::new(parent), base, exists).to_string_lossy().into_owned()
 }
 
+/// A later volume of a set (`a.7z.003`, `a.part2.rar`, `a.z01`, `a.r00`) stands for the
+/// whole set: extraction starts from the volume that opens it.
+pub fn first_volume(archive: &Path) -> PathBuf {
+    let (Some(dir), Some(name)) = (archive.parent(), archive.file_name()) else { return archive.to_path_buf() };
+    unbox_core::naming::first_volume_name(&name.to_string_lossy(), |n| dir.join(n).is_file())
+        .map(|first| dir.join(first))
+        .unwrap_or_else(|| archive.to_path_buf())
+}
+
 impl ExtractionPlan {
     pub fn new(archive: &Path) -> Self {
         let full = full_path_name(archive.as_os_str()).unwrap_or_else(|| archive.to_string_lossy().into_owned());

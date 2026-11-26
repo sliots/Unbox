@@ -231,6 +231,83 @@ if (Test-Path -LiteralPath $sevenZip) {
         Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
         Assert (Test-Path -LiteralPath (Join-Path $dir 'doc\report.docx')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
     }
+
+    function New-SplitSet([string]$Dir, [string]$Archive, [string[]]$Switches) {
+        New-Item -ItemType Directory -Path $Dir | Out-Null
+        & $sevenZip a -bso0 -bsp0 -mx=0 -v4k @Switches $Archive (Join-Path $src '*') | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "7z a failed for $Archive" }
+        $parts = @(Get-ChildItem -LiteralPath $Dir -File | Sort-Object Name)
+        Assert ($parts.Count -ge 3) "only $($parts.Count) volumes"
+        $parts
+    }
+
+    Check 'split 7z volumes: any volume starts the set, recycle takes every volume' {
+        $dir = Join-Path $work 'split'
+        $archive = Join-Path $dir 'movie.7z'
+        $parts = New-SplitSet $dir $archive @()
+        $r = Invoke-Unbox @('extract', "$archive.002")
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert ($r.Out -eq (Join-Path $dir 'movie')) "target was '$($r.Out)'"
+        $a = (Get-FileHash (Join-Path $src '中文目录\深层\data.bin')).Hash
+        $b = (Get-FileHash (Join-Path $dir 'movie\中文目录\深层\data.bin')).Hash
+        Assert ($a -eq $b) 'binary content mismatch'
+        Assert (@(Get-ChildItem -LiteralPath $dir -Filter 'movie.7z.*').Count -eq $parts.Count) 'volumes were removed'
+        Assert-NoLeftovers $dir
+
+        $r = Invoke-Unbox @('extract', "$archive.001", '--recycle')
+        Assert ($r.Code -eq 0) "recycle exit $($r.Code): $($r.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'movie (2)\root.txt')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+        $left = @(Get-ChildItem -LiteralPath $dir -Filter 'movie.7z.*')
+        Assert ($left.Count -eq 0) "volumes not recycled: $($left.Name -join ', ') $($r.Err)"
+    }
+
+    Check 'missing split volumes are named' {
+        $dir = Join-Path $work 'split-gap'
+        $archive = Join-Path $dir 'gap.7z'
+        $parts = New-SplitSet $dir $archive @()
+        Remove-Item -LiteralPath "$archive.002"
+        $r = Invoke-Unbox @('extract', "$archive.001")
+        Assert ($r.Code -eq 1) "exit $($r.Code): $($r.Out)"
+        Assert ($r.Err -match 'gap\.7z\.002') "message: $($r.Err)"
+        Assert (-not (Test-Path -LiteralPath (Join-Path $dir 'gap'))) 'output delivered'
+        Assert-NoLeftovers $dir
+
+        $dir = Join-Path $work 'split-tail'
+        $archive = Join-Path $dir 'tail.7z'
+        $parts = New-SplitSet $dir $archive @()
+        $last = $parts[-1]
+        Remove-Item -LiteralPath $last.FullName
+        $r = Invoke-Unbox @('extract', "$archive.001")
+        Assert ($r.Code -eq 1) "exit $($r.Code): $($r.Out)"
+        Assert ($r.Err -match [regex]::Escape($last.Name)) "message: $($r.Err)"
+        Assert-NoLeftovers $dir
+    }
+
+    Check 'split zip volumes' {
+        $dir = Join-Path $work 'split-zip'
+        $archive = Join-Path $dir 'bundle.zip'
+        New-SplitSet $dir $archive @('-tzip') | Out-Null
+        $r = Invoke-Unbox @('extract', "$archive.001")
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert ((Get-Content -LiteralPath (Join-Path $dir 'bundle\中文目录\说明.txt') -Raw).Trim() -eq 'hello unbox') "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+    }
+
+    Check 'plain split file is joined' {
+        $dir = Join-Path $work 'split-plain'
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $src '中文目录\深层\data.bin'))
+        $n = 0
+        for ($i = 0; $i -lt $bytes.Length; $i += 6000) {
+            $n++
+            $end = [Math]::Min($i + 6000, $bytes.Length) - 1
+            [IO.File]::WriteAllBytes((Join-Path $dir ('blob.bin.{0:000}' -f $n)), [byte[]]$bytes[$i..$end])
+        }
+        $r = Invoke-Unbox @('extract', (Join-Path $dir 'blob.bin.001'))
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        $joined = @(Get-ChildItem -LiteralPath $r.Out -Recurse -File -Filter 'blob.bin')
+        Assert ($joined.Count -eq 1) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+        Assert ((Get-FileHash $joined[0].FullName).Hash -eq (Get-FileHash (Join-Path $src '中文目录\深层\data.bin')).Hash) 'joined content mismatch'
+    }
 } else {
     Write-Warning "7-Zip not found at $sevenZip; password checks skipped."
 }

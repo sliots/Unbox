@@ -276,6 +276,7 @@ impl Controller {
             self.trigger_error("文件不存在", &path);
             return;
         }
+        self.archive = plan::first_volume(&self.archive);
         let plan = ExtractionPlan::new(&self.archive);
         self.source_identity = Some(crate::win::capture_identity(&plan.source));
         let ui = self.ui();
