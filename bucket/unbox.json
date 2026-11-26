@@ -1,0 +1,43 @@
+{
+    "version": "2.0.0",
+    "description": "双击即解压：Windows 11 复制对话框风格的解压代理（7-Zip ZS 引擎）",
+    "homepage": "https://github.com/sliots/Unbox",
+    "license": "MIT,LGPL-2.1-or-later",
+    "notes": [
+        "已为当前用户登记 57 个压缩格式的“打开方式”。",
+        "在 设置 → 应用 → 默认应用 → Unbox 中选择要双击解压的扩展名，或运行：unbox register",
+        "卸载前如需保留关联，可在卸载后重新运行 unbox register。"
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/sliots/Unbox/releases/download/v2.0.0/Unbox-v2.0.0-win-x64.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "extract_dir": "Unbox-v2.0.0-win-x64",
+    "bin": "unbox.exe",
+    "shortcuts": [
+        [
+            "unbox.exe",
+            "Unbox"
+        ]
+    ],
+    "post_install": [
+        "& \"$dir\\unbox.exe\" register --no-settings | Out-Null"
+    ],
+    "pre_uninstall": [
+        "if ($cmd -eq 'uninstall') { & \"$dir\\unbox.exe\" unregister | Out-Null }"
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/sliots/Unbox/releases/download/v$version/Unbox-v$version-win-x64.zip",
+                "hash": {
+                    "url": "$baseurl/SHA256SUMS.txt"
+                }
+            }
+        },
+        "extract_dir": "Unbox-v$version-win-x64"
+    }
+}

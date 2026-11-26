@@ -1,0 +1,90 @@
+name: Release
+
+# Push a tag such as v2.0.0 (matching the workspace version in Cargo.toml) to build,
+# test and publish the portable zip, then refresh the Scoop manifest in bucket/.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v2.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Branch that hosts the Rust edition and the Scoop bucket manifest.
+  MANIFEST_BRANCH: rust
+
+jobs:
+  release:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+      name: ${{ steps.package.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Package
+        id: package
+        shell: pwsh
+        run: ./scripts/package.ps1 -Version "${{ github.event.inputs.tag || github.ref_name }}"
+      - name: Smoke test
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1 -PackageDir "${{ steps.package.outputs.dir }}"
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: Unbox ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/${{ steps.package.outputs.name }}.zip
+            dist/SHA256SUMS.txt
+
+  scoop:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.MANIFEST_BRANCH }}
+      - name: Update bucket/unbox.json
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA256: ${{ needs.release.outputs.sha256 }}
+          NAME: ${{ needs.release.outputs.name }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          path = "bucket/unbox.json"
+          with open(path, encoding="utf-8") as f:
+              manifest = json.load(f)
+          version, name, repo = os.environ["VERSION"], os.environ["NAME"], os.environ["REPO"]
+          manifest["version"] = version
+          manifest["homepage"] = f"https://github.com/{repo}"
+          arch = manifest["architecture"]["64bit"]
+          arch["url"] = f"https://github.com/{repo}/releases/download/v{version}/{name}.zip"
+          arch["hash"] = os.environ["SHA256"]
+          manifest["extract_dir"] = name
+          auto = manifest["autoupdate"]["architecture"]["64bit"]
+          auto["url"] = f"https://github.com/{repo}/releases/download/v$version/Unbox-v$version-win-x64.zip"
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=4)
+              f.write("\n")
+          PY
+      - name: Commit manifest
+        run: |
+          if git diff --quiet; then echo "Manifest already up to date"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "scoop: unbox ${{ needs.release.outputs.version }}"
+          git push origin HEAD:${{ env.MANIFEST_BRANCH }}

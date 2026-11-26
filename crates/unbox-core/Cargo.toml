@@ -1,0 +1,13 @@
+[package]
+name = "unbox-core"
+description = "Platform-independent rules of Unbox: format catalog, naming, path policy, name decoding, manifests and IPC."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+crc32fast.workspace = true

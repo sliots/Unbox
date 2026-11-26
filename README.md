@@ -4,293 +4,199 @@
 
 # Unbox
 
-<h3>
-  <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Package.png" width="26" height="26" />
-  <i>Double-Click to Extract, Fluent & Native</i>
-  <img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Objects/Package.png" width="26" height="26" />
-</h3>
+<h3><i>Double-Click to Extract, Fluent & Native</i></h3>
 
-**面向 Windows 11 的高仿原生文件复制对话框 · 极简无扰双击自动解压代理**
+**面向 Windows 11 的复制对话框风格 · 双击即解压代理（Rust 重写版）**
 
 <p>
-  <a href="https://github.com/Snowail/Unbox/releases">
-    <img src="https://img.shields.io/badge/Version-v1.4.0-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
+  <a href="https://github.com/sliots/Unbox/releases">
+    <img src="https://img.shields.io/badge/Version-v2.0.0-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
   </a>
-  <a href="https://github.com/Snowail/Unbox">
-    <img src="https://img.shields.io/badge/Platform-Windows_11_%7C_10-0078D4?style=for-the-badge&logo=windows&labelColor=000000" alt="Platform">
-  </a>
-  <a href="https://github.com/Snowail/Unbox">
-    <img src="https://img.shields.io/badge/Architecture-x64-555555?style=for-the-badge&logo=amd&labelColor=000000" alt="Architecture">
-  </a>
-  <a href="https://github.com/Snowail/Unbox">
-    <img src="https://img.shields.io/badge/Core-C%2B%2B20_%7C_WPF_.NET_10-512BD4?style=for-the-badge&logo=dotnet&labelColor=000000" alt="Core">
-  </a>
-  <a href="https://www.7-zip.org/">
+  <img src="https://img.shields.io/badge/Platform-Windows_11_%7C_10-0078D4?style=for-the-badge&logo=windows&labelColor=000000" alt="Platform">
+  <img src="https://img.shields.io/badge/Core-Rust_%7C_Slint-B7410E?style=for-the-badge&logo=rust&labelColor=000000" alt="Core">
+  <a href="https://github.com/mcmilk/7-Zip-zstd">
     <img src="https://img.shields.io/badge/Engine-7--Zip_ZS_26.05-FF8C00?style=for-the-badge&labelColor=000000" alt="Engine">
   </a>
   <a href="LICENSE">
-    <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge&logo=opensourceinitiative&color=3DA639&labelColor=000000" alt="License">
+    <img src="https://img.shields.io/badge/License-MIT-3DA639?style=for-the-badge&logo=opensourceinitiative&labelColor=000000" alt="License">
   </a>
 </p>
 
-<br>
-
-<!-- Hero Banner Showcase -->
-<img src="assets/banner.png" width="900" alt="Unbox Preview" style="border-radius: 14px; box-shadow: 0 20px 40px rgba(0,0,0,0.45);">
+<img src="assets/banner.png" width="900" alt="Unbox Preview">
 
 </div>
 
-<br>
-
 ---
 
-## 💡 The Problem
+## 💡 为什么需要 Unbox
+
+在 Windows 上解压，总要在右键二级菜单里找“解压到当前文件夹”，一不小心上千个文件就铺满了下载目录；传统解压软件常驻后台、弹广告、弹向导。
+
+**Unbox 的回答：双击即可，解完即走。** 它像 macOS 的 Archive Utility 一样自然，外观则贴近 Windows 11 自带的文件复制对话框。
+
+## ✨ 2.0：Rust 完全重写
+
+| | 1.x | 2.0 |
+|:--|:--|:--|
+| 外壳 | WPF / .NET 10（需安装桌面运行时） | **Rust + Slint**，单个 `unbox.exe`，无运行时依赖 |
+| 解压核心 | 独立 C++ `UnzipWorker.exe` | 同一个 `unbox.exe --worker` 子进程，仍隔离加载 7z.dll，并由任务对象托管 |
+| 文件关联 | PowerShell 脚本 + `安装与卸载.cmd` | `unbox register / unregister / status`，图标内嵌在 exe 中 |
+| 分发 | 手动下载便携包 | GitHub Actions 自动构建、测试、发布；**支持 Scoop 安装** |
+| 命令行 | — | `unbox extract <压缩包>` 无窗口解压（同一条校验与提交路径） |
+
+### UI 与动效
+
+- **流畅的进度**：进度条宽度、吞吐面积图、速度参考线都带缓动过渡，不再逐帧跳动；未知总大小时显示往复扫光的不定进度条。
+- **详细信息展开/折叠**：窗口高度、内容透明度与折角箭头同步变形动画（箭头由 ⌄ 平滑翻转为 ⌃）。
+- **状态色过渡**：运行 / 暂停 / 警告 / 失败之间的强调色渐变；完成与失败时状态文字前弹出带回弹的 ✓ / ! 徽标。
+- **对话框改为窗内面板**：密码、文件名编码、非法文件名、回收站提示、解压上限等询问以面板形式从下方滑入，窗口自动长高后再收回，不再弹出独立小窗口。
+- **原生质感**：跟随系统深浅色、深色标题栏、Mica 标题栏背景、圆角窗口；**任务栏按钮同步显示进度**（暂停变黄、失败变红），出错时闪烁提醒。
+- 入场时内容轻微上浮淡入；单选、复选、按钮均有悬停与按压过渡。
+
+## ⚡ 产品行为（与 1.x 一致）
 
 <table>
-<tr>
-<td width="60%">
-
-### 为什么在 Windows 上解压文件总是如此繁琐？
-
-日常在 Windows 上解压文件，你一定经历过这样的场景：
-- **菜单层级繁琐**：右键点击压缩包，在层层右键二级菜单里谨慎寻找“解压到当前文件夹”或“解压到 `包名\`”——一旦点错，上千个零散文件瞬间铺满整个桌面或下载文件夹；
-- **弹窗与广告骚扰**：许多传统解压软件不仅体积臃肿、常驻后台，还充斥着弹窗推荐和捆绑应用；
-- **解压向导打扰心流**：跳出一个复杂的解压向导窗口，反复确认目标路径、编码和压缩方式，解压完成后还要手动关闭窗口、找到对应文件夹。
-
-> **Unbox 的回答：回归直觉。双击即可，解完即走。**
-
-Unbox 让解压体验变得像 macOS 的 Archive Utility 一样自然，同时兼具 Windows 11 自带文件复制对话框的现代视觉质感。
-
-</td>
-<td width="40%" align="center">
-
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Activities/Sparkles.png" width="90"><br>
-
-**只需双击**<br>
-无需选择菜单，无需确认路径<br>
-后台流式解压，完成自动退出播放提示音
-
-</td>
-</tr>
+<tr><td width="28%"><b>📁 目录结构与防冲突</b></td><td>
+以包名建立根目录并完整保留包内层级；仅当包内<b>恰好只有一个与包名同名的子目录</b>时折叠这一级；<code>.tar.gz</code> / <code>.tgz</code> 等按内容确认内层 TAR 后展开；目标已存在时自动递增为 <code>名称 (2)</code>，<b>绝不覆盖</b>。
+</td></tr>
+<tr><td><b>🗑️ 移入回收站与安全校验</b></td><td>
+只回收本次真正读取过的源卷；回收前用<b>卷序列号 + 128 位文件 ID + 长度 + 修改时间</b>核对身份，并对交付内容逐项做长度与 CRC32 复核，通过 Shell <code>IFileOperation</code> 回收并核实回收站落点。网络路径、回收站被禁用或容量未知、部分完成、任一校验不一致时<b>保留源包</b>。
+</td></tr>
+<tr><td><b>🎯 57 种格式</b></td><td>
+常用归档、分卷入口、压缩流、发行包与磁盘映像；资源管理器可原生打开的 <code>.iso</code> / <code>.vhd(x)</code> 与 Office 容器不登记。
+</td></tr>
+<tr><td><b>🍏 编码与 macOS 文件</b></td><td>
+尊重 ZIP bit 11、Unicode Path 扩展字段与 PAX <code>path</code> 的编码声明；未声明的名称按系统代码页解码，确实不确定时让用户选择（附示例名）。自动过滤 <code>__MACOSX/</code>、<code>.DS_Store</code>、<code>._*</code>。
+</td></tr>
+<tr><td><b>🛡️ 路径安全</b></td><td>
+拒绝绝对路径、<code>..</code>、设备名与链接条目；所有目录逐级相对已验证的父句柄创建，并以句柄最终路径核对，联接点/符号链接无法把写入引出暂存区。非法字符可批量替换为 <code>-</code> 或跳过（此时显示“部分完成”并保留源包）。
+</td></tr>
+<tr><td><b>📏 输出预算</b></td><td>
+按声明大小设置写出上限，防止声明失真写满磁盘；大小未知的流超限时可输入更大的上限后从头重新解压。
+</td></tr>
 </table>
 
-<br>
+## 📦 安装
 
----
+### Scoop（推荐）
 
-## ⚡ Superpowers
+```powershell
+scoop bucket add unbox https://github.com/sliots/Unbox   # 默认分支需包含 bucket/
+scoop install unbox/unbox
+# 或者直接用清单地址安装 Rust 分支：
+scoop install https://raw.githubusercontent.com/sliots/Unbox/rust/bucket/unbox.json
+```
 
-<div align="center">
+安装后会自动为当前用户登记“打开方式”。随后在 **设置 → 应用 → 默认应用 → Unbox** 中把需要双击解压的扩展名设为 Unbox。`scoop update` 后关联仍指向 `current` 目录，无需重新登记；`scoop uninstall unbox` 会自动移除关联。
 
-### 六大精心设计的专业产品行为 (D1 ~ D6)
+### 便携包
 
-</div>
+从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.0-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
 
-<br>
+```powershell
+.\unbox.exe register      # 登记关联并打开“默认应用”设置
+.\unbox.exe status        # 查看登记状态
+.\unbox.exe unregister    # 移除关联
+```
 
-<table>
-  <thead>
-    <tr>
-      <th width="30%">功能特性</th>
-      <th width="70%">产品细节与行为规范</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>
-        <b>🪟 1:1 原生 Win11 复制对话框</b><br>
-        <sub>Fluent 现代设计美感</sub>
-      </td>
-      <td>
-        • <b>双模式自如切换</b>：默认保持极简折叠模式，一键展开详细监控；<br>
-        • <b>平滑缓动动画</b>：展开与折叠采用 <code>CubicEase</code> 平滑过度，无生硬闪跳；<br>
-        • <b>原生堆积面积图</b>：10x6 经典网格、水平吞吐波浪推进、500ms 平滑滤波限流；暂停时自适应转为琥珀金/亮黄色；<br>
-        • <b>记忆偏好</b>：自动记住用户的展开/折叠状态，下次启动无缝还原。
-      </td>
-    </tr>
-    <tr>
-      <td>
-        <b>📁 D1 目录结构与防冲突自增</b><br>
-        <sub>包内层级完整保留</sub>
-      </td>
-      <td>
-        • <b>保留包内层级</b>：压缩包解压后统一以包名建立根目录（如 <code>测试.zip</code> 内有 <code>release/src/main.c</code>，解压后得到 <code>测试/release/src/main.c</code>）；<br>
-        • <b>同名唯一根目录折叠</b>：仅当包内<strong>恰好只有一个子目录、无同级文件、且该子目录与压缩包基名一致</strong>时，才折叠这一级冗余同名目录（<code>希捷专修.zip</code> → <code>希捷专修/…</code>）。包名本身带 <code>(2)</code> 之类的后缀不会被误判；<br>
-        • <b>复合扩展名智能剥离</b>：<code>.tar.gz</code>、<code>.tar.xz</code>、<code>.tgz</code> 按<strong>内容</strong>确认内层 TAR 后再展开，无原名、原名无扩展名的样本同样交付最终正文；<br>
-        • <b>同名自动递增</b>：目标同级目录下若存在同名文件夹，自动递增命名为 <code>测试 (2)</code>、<code>测试 (3)</code>，<b>绝不覆盖已有文件</b>。
-      </td>
-    </tr>
-    <tr>
-      <td>
-        <b>🗑️ D2 移入回收站与安全校验</b><br>
-        <sub>安全第一，源包无忧</sub>
-      </td>
-      <td>
-        • <b>偏好持久化记忆</b>：界面勾选“解压完成后移入回收站”自动跨会话持久化保存；<br>
-        • <b>分卷与无校验格式警示</b>：每次取消勾选后重新勾选时，贴心提示分卷包整组移入风险；<br>
-        • <b>逐卷可验证的回收</b>：只回收本次真正读取过的源卷；回收前用<b>卷序列号 + 128 位文件 ID + 长度 + 修改时间</b>核对身份（被替换的文件拒绝回收），随后通过 Shell <code>IFileOperation</code> 显式回收，并<b>逐卷报告真实结果与回收站落点</b>；<br>
-        • <b>安全兜底原则</b>：仅当全部交付内容通过<b>逐项清单对账</b>（路径/类型/长度，回收前追加 CRC32 摘要）时才回收源包；网络路径、不支持回收介质、中途取消、用户跳过条目或任一校验不一致时，<b>绝对保留源包</b>。按产品规则过滤的 macOS 元数据不计为跳过项。
-      </td>
-    </tr>
-    <tr>
-      <td>
-        <b>🎯 D3 & D4 全面登记与镜像过滤</b><br>
-        <sub>专注归档，不破坏原生流</sub>
-      </td>
-      <td>
-        • <b>全面关联 57 种格式</b>：涵盖所有主流归档、压缩流、分卷入口及常用虚拟机镜像；<br>
-        • <b>智能排除系统原生容器</b>：严格排除资源管理器能原生挂载的镜像（<code>.iso</code>、<code>.vhd</code>、<code>.vhdx</code>）以及 Office/应用容器（<code>.docx</code>、<code>.apk</code>、<code>.msi</code>、<code>.exe</code>），保留原有启动与编辑入口。
-      </td>
-    </tr>
-    <tr>
-      <td>
-        <b>🍏 D5 跨平台兼容 & Mac 辅助文件过滤</b><br>
-        <sub>告别乱码与苹果垃圾文件</sub>
-      </td>
-      <td>
-        • <b>尊重归档声明的文件名编码</b>：ZIP 通用标志位（bit 11）声明为 UTF-8 的名称逐字保留，未声明编码的名称按系统代码页解码；仅当编码确实不确定时才弹出<b>编码选择框</b>（可选 UTF-8 / GBK / Big5 / Shift-JIS / EUC-KR 等，并附示例名）；<br>
-        • <b>静默过滤苹果辅助文件</b>：解压时自动拦截并丢弃 <code>__MACOSX/</code> 目录、<code>.DS_Store</code> 及 <code>._*</code> 资源分叉文件，保持输出目录干净整洁；过滤项单独计数，不会导致正常文件被丢弃。
-      </td>
-    </tr>
-    <tr>
-      <td>
-        <b>🛡️ D6 非法字符清洗与部分完成</b><br>
-        <sub>健壮容错，状态清晰</sub>
-      </td>
-      <td>
-        • <b>非法字符自动清洗</b>：Windows 禁用字符（<code>:*?"<>|</code> 等）默认批量替换为 <code>-</code>，系统保留设备名（<code>CON</code>、<code>AUX</code> 等）自动加安全前缀；<br>
-        • <b>跳过项联动规则</b>：若用户选择跳过非法条目，<b>可表示的文件仍会正常交付</b>，任务最终明确显示为“部分完成”，源压缩包自动保留，杜绝数据意外丢失；提取失败（CRC/数据损坏/缺卷）则整体不交付。
-      </td>
-    </tr>
-  </tbody>
-</table>
+旧版（1.x）的关联会被 `unregister` 一并清理。设置文件沿用 `%LOCALAPPDATA%\UnzipProxy\settings.json`，旧版偏好可直接继承。
 
-<br>
+### 命令行
 
----
+```powershell
+unbox extract D:\Downloads\project.7z --password secret
+# 成功时在标准输出打印目标目录；退出码 0 成功 / 2 部分完成 / 1 失败
+```
 
-## 📦 Get Started
+`--skip-invalid` 跳过非法文件名（默认批量重命名），`--cp 936` 指定文件名代码页，`--recycle` 校验通过后回收源包。
 
-### 1. 下载便携包 (Portable)
+## 🗂️ 支持的格式
 
-便携包文件名为 `Unbox-v1.4.0-win-x64.zip`。已发布版本可在 [Releases](https://github.com/Snowail/Unbox/releases) 查看。
-
-- **免安装**：解压即可使用，支持随身 U 盘便携携带；
-- **现代轻量化部署**：采用 **.NET 10 LTS 框架依赖部署 (Framework-Dependent)**，包体积仅 ~2.6 MB（缩减 95.3%）。系统仅需安装官方 Windows x64 .NET 10 桌面运行时 (Desktop Runtime)。
-
-### 2. 安装或修复关联
-
-将便携包解压到常用目录，例如 `D:\Tools\Unbox`。
-
-1. 双击 **`安装与卸载.cmd`**，选择 **[1] 安装或修复关联**。
-2. 菜单为当前 Windows 用户登记 57 个扩展名的打开方式和图标，然后打开系统的「默认应用」设置。
-3. 在「默认应用」中，把需要双击解压的扩展名设为由 **Unbox** 打开。
-
-### 3. 双击解压
-
-设置好默认应用后，在资源管理器中 **双击对应格式的压缩包**：
-- 现代任务窗口轻盈浮现，开始高速流式解压；
-- 支持点击左下角 **“详细信息”** 查看实时吞吐面积图；
-- 完整解压后播放内置提示音。
-
-### 4. 卸载关联
-
-双击 **`安装与卸载.cmd`**，选择 **[2] 卸载关联**，即可清理当前用户的 Unbox 文件关联。
-
-<br>
-
----
-
-## 🗂️ Supported Formats
-
-Unbox 支持以下归档、分卷入口、映像和压缩流。安装菜单登记 57 个扩展名。TAR 长后缀也能识别，Windows 通过最后一段扩展名打开文件。
-
-| 分类 | 格式扩展名 |
+| 分类 | 扩展名 |
 |:---|:---|
-| **常用归档** | `.zip`, `.zipx`, `.7z`, `.rar`, `.tar`, `.ova`, `.lzh`, `.lha`, `.cab`, `.arj` |
-| **分卷入口** | `.r00`, `.001` |
-| **发行包与系统归档** | `.deb`, `.rpm`, `.cpio`, `.xar`, `.xip` |
-| **映像与虚拟机磁盘** | `.wim`, `.swm`, `.esd`, `.dmg` (Apple 磁盘映像), `.squashfs`, `.vmdk`, `.vdi`, `.qcow`, `.qcow2`, `.fat`, `.ntfs` |
+| **常用归档** | `.zip` `.zipx` `.7z` `.rar` `.tar` `.ova` `.lzh` `.lha` `.cab` `.arj` |
+| **分卷入口** | `.r00` `.001` |
+| **发行包与系统归档** | `.deb` `.rpm` `.cpio` `.xar` `.xip` |
+| **映像与虚拟磁盘** | `.wim` `.swm` `.esd` `.dmg` `.squashfs` `.vmdk` `.vdi` `.qcow` `.qcow2` `.fat` `.ntfs` |
 
-普通压缩流解开最外层。使用 TAR 短别名或长后缀时，Unbox 会继续展开内层 TAR。
-
-| 压缩格式 | 普通流 | TAR 短别名 | TAR 长后缀 |
+| 压缩流 | 普通流 | TAR 短别名 | TAR 长后缀 |
 |:---|:---|:---|:---|
-| gzip | `.gz`, `.gzip` | `.tgz`, `.tpz` | `.tar.gz`, `.tar.gzip` |
-| bzip2 | `.bz2`, `.bzip2` | `.tbz2`, `.tbz` | `.tar.bz2`, `.tar.bzip2` |
+| gzip | `.gz` `.gzip` | `.tgz` `.tpz` | `.tar.gz` `.tar.gzip` |
+| bzip2 | `.bz2` `.bzip2` | `.tbz2` `.tbz` | `.tar.bz2` `.tar.bzip2` |
 | XZ | `.xz` | `.txz` | `.tar.xz` |
 | UNIX Compress | `.z` | `.taz` | `.tar.z` |
-| LZMA | `.lzma`, `.lzma86` | — | `.tar.lzma` |
-| Zstandard | `.zst`, `.zstd` | `.tzst`, `.tzstd` | `.tar.zst`, `.tar.zstd` |
-| Brotli | `.br`, `.brotli` | `.tbr` | `.tar.br`, `.tar.brotli` |
-| LZ4 | `.lz4` | `.tlz4` | `.tar.lz4` |
-| LZ5 | `.lz5` | `.tlz5` | `.tar.lz5` |
-| Lizard | `.liz` | `.tliz` | `.tar.liz` |
+| LZMA | `.lzma` `.lzma86` | — | `.tar.lzma` |
+| Zstandard | `.zst` `.zstd` | `.tzst` `.tzstd` | `.tar.zst` `.tar.zstd` |
+| Brotli | `.br` `.brotli` | `.tbr` | `.tar.br` `.tar.brotli` |
+| LZ4 / LZ5 / Lizard | `.lz4` `.lz5` `.liz` | `.tlz4` `.tlz5` `.tliz` | `.tar.lz4` `.tar.lz5` `.tar.liz` |
 | Lzip | `.lz` | `.tlz` | `.tar.lz` |
 
-> *注：系统原生可直接加载挂载的 `.iso`、`.vhd`、`.vhdx` 以及办公文档容器（`.docx`、`.xlsx` 等）严格排除关联，保留原有系统行为。*
+格式清单的唯一来源是 [`assets/archive-formats.json`](assets/archive-formats.json)，路由规则、文件选择框和文件关联都由它生成。
 
-<br>
+## 🛠️ 从源码构建
 
----
+需要 Windows 10/11 x64、[Rust](https://rustup.rs)（stable，MSVC 工具链）与 Visual Studio Build Tools（提供 `rc.exe`）。
 
-## 1.4.0 引擎与解压规则
+```powershell
+cargo build --release -p unbox            # target\release\unbox.exe
+copy assets\7z.dll target\release\        # 7z.dll 需与 unbox.exe 同目录
+.\scripts\package.ps1                     # 生成 dist\Unbox-v<版本>-win-x64.zip 与 SHA256SUMS.txt
+.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.0-win-x64
+```
 
-- 7z 容器支持读取 Zstandard、Brotli、LZ4、LZ5、Lizard、Fast-LZMA2。独立压缩流增加 Brotli、LZ4、LZ5、Lizard、Lzip 与 Zstandard 别名。
-- 普通压缩流只解一层。显式复合扩展名和 TAR 短别名解到 TAR 正文，原有分卷入口继续沿用独立规则。
-- 支持读取 XChaCha20、XChaCha20-Poly1305、AXP、AXA、XAA 加密的 7z 归档，以及既有的 7zAES。
-- 可证明长度的 LZ4 原样块流按实际长度设置预算；未知大小的流超限时，可以为当前任务输入一个更大的有限上限，再从头解压。
-- 引擎由 7-Zip 26.06 切换到 7-Zip 26.05 ZS。26.06 的 Linux split 兼容性改进随本次切换回退，Windows 分卷入口仍保留。
+在 macOS / Linux 上交叉编译（需要 LLVM 提供 `clang-cl`、`llvm-rc`，首次会自动下载 MSVC CRT 与 Windows SDK）：
 
-源码构建需要 [resvg 0.47.0 x64](https://github.com/linebender/resvg/releases/tag/v0.47.0) 和 PATH 上的 FFmpeg。将 `UNBOX_RESVG` 指向 `resvg.exe`，在仓库根运行 `powershell -ExecutionPolicy Bypass -File scripts\make_app_icon.ps1`。WPF 构建也会在资源缺失或源文件变化时自动生成 ICO 和 PCM WAV。
+```bash
+cargo install cargo-xwin
+cargo xwin build --release -p unbox --target x86_64-pc-windows-msvc
+```
 
-## ✅ Quality & Verification
+项目结构：
 
-- 下载后可用 GitHub Release 附带的 `SHA256SUMS.txt` 核对便携 ZIP 的 SHA-256。
-- **生产完成路径自动化**：`tests/Tester` 直接调用与 WPF 完全相同的 `ExtractionCompleter`（清单对账 → 同名折叠 → 来源标记 → 单次目录改名提交 → 提交后复核 → 逐卷回收），90 项用例覆盖文件名编码、复合 TAR、缺尾卷、空归档、部分完成、回收身份核对，以及真实回收后从回收站落点核对 SHA-256。
-- **性能基线**（同机实测）：1,200 个小文件解压 `373 ms` / 13 个进度帧；清单对账 + 单次目录改名提交 `109 ms`。
+```
+crates/unbox-core   平台无关的规则（格式目录、命名、路径策略、文件名解码、清单对账、IPC 协议），可在任何系统上 cargo test
+crates/unbox        Windows 程序：Slint 界面、7-Zip COM 工作进程、句柄级文件系统访问、Shell 回收、文件关联
+crates/unbox/ui     app.slint 界面与动效
+bucket/unbox.json   Scoop 清单（发布时由 CI 自动更新版本与哈希）
+```
 
-<br>
+图标（应用图标由 `appicon/*.svg` 渲染，格式图标由 `icons/*.png` 生成）与完成提示音（`Finished.mp3` 解码为 WAV）都在构建时由 `build.rs` 生成并嵌入 exe，不再需要 resvg 或 FFmpeg。
 
----
+## 🚀 CI 与发布
 
-## 🗺️ Roadmap
+- **CI**（`.github/workflows/ci.yml`）：Linux 上检查格式并运行 `unbox-core` 单元测试；Windows 上 Clippy、打包，并用 `scripts/smoke-test.ps1` 端到端验证 ZIP / 中文名 / 同名折叠 / `.tar.gz` / 损坏包 / 关联登记。
+- **发布**（`.github/workflows/release.yml`）：推送与 `Cargo.toml` 版本一致的标签即可：
 
-Unbox 持续演进中，后续版本规划如下：
+  ```bash
+  git tag v2.0.0 && git push origin v2.0.0
+  ```
 
-- [ ] **多国语言国际化 (i18n)**：添加多国语言支持，根据 Windows 系统语言自动选择并切换默认显示语言；
-- [ ] **Windows 11 原生风格归档管理器 (Unbox File Manager)**：提供完整查看、修改、打包压缩包内容的高级文件管理界面，基于 Windows 11 原生 Fluent 风格重新打造类似 7zFM 的现代体验；用户通过**按住 Shift 键双击压缩文件**即可呼出文件管理窗口，兼顾轻量极速解压与深度包内浏览修改的双重需求。
+  工作流会构建、测试、创建 GitHub Release（zip + SHA256SUMS.txt），并把新版本号与哈希写回 `rust` 分支的 `bucket/unbox.json`。
 
-<br>
+## 🔄 跟进上游（1.x C#/C++ 版本）
 
----
+Rust 版本位于 `rust` 分支，旧的 C#/C++ 源码（`src/`、`tests/`、关联脚本）已从本分支删除；`main` 继续镜像上游 [Snowail/Unbox](https://github.com/Snowail/Unbox)。合并前先看上游改了哪些逻辑，再移植到 `crates/`：
+
+```bash
+git remote add upstream https://github.com/Snowail/Unbox.git   # 只需一次
+git fetch upstream
+git checkout main && git merge upstream/main && git push        # main 继续镜像上游
+git checkout rust
+git log -p rust..main -- src tests                                # 需要移植的旧版逻辑改动
+git merge main                                                    # 合并共用资源
+git -c core.quotepath=off status --short | grep -E '^(DU|UD) ' | cut -c4- | xargs -r git rm -q   # 旧源码的“修改/删除”冲突一律保持删除
+git commit
+```
+
+`assets/`、`icons/`、`appicon/`、`Finished.mp3` 两个版本共用，上游对格式清单、图标、7z.dll 的更新合并后即生效（更换 7z.dll 时同时更新 `scripts/package.ps1` 中的固定哈希）。
 
 ## 📜 License & Credits
 
-<div align="center">
+- 解压引擎：[7-Zip 26.05 ZS v1.5.7 R1 x64](https://github.com/mcmilk/7-Zip-zstd/releases/tag/v26.05-v1.5.7-R1)，分发许可与对应源码见 [THIRD-PARTY.txt](assets/licenses/7zip-zs/THIRD-PARTY.txt)。
+- 界面框架：[Slint](https://slint.dev)，按 Slint Royalty-free License 使用，需保留下方署名徽标。
 
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Smilies/Beating%20Heart.png" width="50"><br>
+  [![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-light.svg)](https://slint.dev)
+- 图标原始设计：[smalllikeart (Flaticon)](https://www.flaticon.com/authors/smalllikeart)，由本项目按格式定制。
+- 原始项目：[Snowail/Unbox](https://github.com/Snowail/Unbox)。
 
-### Standing on the Shoulders of Giants
-
-</div>
-
-- **解压核心引擎**：[7-Zip 26.05 ZS v1.5.7 R1 x64](https://github.com/mcmilk/7-Zip-zstd/releases/tag/v26.05-v1.5.7-R1)。分发许可和对应源码见 [THIRD-PARTY.txt](assets/licenses/7zip-zs/THIRD-PARTY.txt)。
-- **图标原始设计**：[smalllikeart (Flaticon)](https://www.flaticon.com/authors/smalllikeart) 并由本项目根据格式定制生成；
-- **Emoji 资源**：[Animated Fluent Emojis](https://github.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis) by Tarikul Islam Anik。
-
-本项目开源核心采用 [MIT License](LICENSE)。
-
----
-
-<div align="center">
-
-<sub>Made with ❤️ for Windows 11 Users</sub>
-
-<br>
-
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Travel%20and%20places/Rocket.png" width="22">
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/master/Emojis/Smilies/Star-Struck.png" width="22">
-<img src="https://raw.githubusercontent.com/Tarikul-Islam-Anik/Animated-Fluent-Emojis/refs/heads/master/Emojis/Travel%20and%20places/Star.png" width="22">
-
-</div>
+本项目代码采用 [MIT License](LICENSE)。
