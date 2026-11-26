@@ -1,12 +1,17 @@
 //! Throughput estimation and the copy-dialog style area graph model.
 
-/// Smoothed throughput in MB/s.
+use std::collections::VecDeque;
+
+/// Seconds of history the throughput is averaged over.
+const WINDOW: f64 = 2.0;
+
+/// Throughput in MB/s, averaged over a sliding time window so bursty progress reports
+/// (one per file, or one per 7-Zip callback) do not make it jump around.
 #[derive(Debug, Default)]
 pub struct SpeedMeter {
-    last_bytes: u64,
-    last_time: f64,
+    samples: VecDeque<(f64, u64)>,
     last_display_time: f64,
-    /// Exponentially smoothed speed.
+    /// Windowed speed.
     pub current: f64,
     /// Speed shown as text, refreshed at most every 500 ms to avoid flicker.
     pub displayed: f64,
@@ -14,25 +19,30 @@ pub struct SpeedMeter {
 
 impl SpeedMeter {
     pub fn reset(&mut self, now: f64, bytes: u64) {
-        *self = SpeedMeter { last_bytes: bytes, last_time: now, last_display_time: now, current: 0.0, displayed: 0.0 };
+        *self = SpeedMeter { samples: VecDeque::from([(now, bytes)]), last_display_time: now, current: 0.0, displayed: 0.0 };
     }
 
     /// Restart the rate window without losing the shown speed (after resume).
     pub fn rebase(&mut self, now: f64, bytes: u64) {
-        self.last_bytes = bytes;
-        self.last_time = now;
+        self.samples = VecDeque::from([(now, bytes)]);
         self.last_display_time = now;
     }
 
     pub fn sample(&mut self, now: f64, completed: u64, paused: bool) {
-        let elapsed = now - self.last_time;
-        if elapsed >= 0.03 {
-            if completed >= self.last_bytes {
-                let instant = (completed - self.last_bytes) as f64 / (1024.0 * 1024.0) / elapsed;
-                self.current = if self.current > 0.0 { self.current * 0.75 + instant * 0.25 } else { instant };
+        match self.samples.back() {
+            Some(&(_, bytes)) if completed < bytes => self.samples = VecDeque::from([(now, completed)]),
+            Some(&(time, _)) if now - time < 0.03 => {}
+            _ => self.samples.push_back((now, completed)),
+        }
+        // Keep exactly one sample at or before the window start.
+        while self.samples.len() > 2 && now - self.samples[1].0 >= WINDOW {
+            self.samples.pop_front();
+        }
+        if let Some(&(start, bytes)) = self.samples.front() {
+            let elapsed = now - start;
+            if elapsed >= 0.25 {
+                self.current = (completed - bytes) as f64 / (1024.0 * 1024.0) / elapsed;
             }
-            self.last_bytes = completed;
-            self.last_time = now;
         }
         if now - self.last_display_time >= 0.5 || self.displayed <= 0.0 || paused {
             self.displayed = self.current;
@@ -43,11 +53,15 @@ impl SpeedMeter {
 
 const BUCKETS: usize = 120;
 
-/// Horizontal "stacked area" graph: x is overall progress, y is throughput.
+/// Horizontal "stacked area" graph: x is overall progress, y is throughput. Each
+/// bucket holds the average speed over its slice of progress; finished buckets never
+/// change, and the scale only grows, so the curve settles instead of twitching.
 #[derive(Debug, Clone)]
 pub struct SpeedGraph {
     buckets: [f64; BUCKETS],
     last_bucket: usize,
+    bucket_sum: f64,
+    bucket_samples: u32,
     peak: f64,
     pub max_scale: f64,
     pub progress: f64,
@@ -57,7 +71,17 @@ pub struct SpeedGraph {
 
 impl Default for SpeedGraph {
     fn default() -> Self {
-        Self { buckets: [0.0; BUCKETS], last_bucket: 0, peak: 0.0, max_scale: 10.0, progress: 0.0, speed: 0.0, display_speed: 0.0 }
+        Self {
+            buckets: [0.0; BUCKETS],
+            last_bucket: 0,
+            bucket_sum: 0.0,
+            bucket_samples: 0,
+            peak: 0.0,
+            max_scale: 10.0,
+            progress: 0.0,
+            speed: 0.0,
+            display_speed: 0.0,
+        }
     }
 }
 
@@ -73,19 +97,29 @@ fn nice_scale(value: f64) -> f64 {
 impl SpeedGraph {
     pub fn push(&mut self, progress: f64, speed: f64, display_speed: f64) {
         let p = progress.clamp(0.0, 1.0);
-        let bucket = (p * (BUCKETS - 1) as f64) as usize;
+        let bucket = ((p * (BUCKETS - 1) as f64) as usize).max(self.last_bucket);
         if speed > 0.05 {
-            // The first real sample (or one that dwarfs early noise) flattens the history
-            // so the graph never starts with a slanted triangle.
-            let from = if self.peak <= 0.0 || self.peak < speed * 0.4 { 0 } else { self.last_bucket };
-            for b in &mut self.buckets[from..=bucket] {
-                *b = speed;
+            if self.peak <= 0.0 {
+                // The first real sample flattens the history so the graph never starts
+                // with a slanted triangle.
+                self.buckets[..=bucket].fill(speed);
+                self.bucket_sum = 0.0;
+                self.bucket_samples = 0;
+            } else if bucket != self.last_bucket {
+                // Progress skipped past buckets: they ran at the current speed. A new
+                // bucket starts from the previous one's average so the tip does not jump.
+                let previous = self.buckets[self.last_bucket];
+                self.buckets[self.last_bucket + 1..=bucket].fill(speed);
+                self.bucket_sum = previous;
+                self.bucket_samples = 1;
             }
+            self.bucket_sum += speed;
+            self.bucket_samples += 1;
+            self.buckets[bucket] = self.bucket_sum / self.bucket_samples as f64;
             self.last_bucket = bucket;
-            self.peak = self.peak.max(speed);
+            self.peak = self.peak.max(self.buckets[bucket]).max(display_speed);
         }
-        let peak = speed.max(display_speed).max(self.peak);
-        self.max_scale = nice_scale((peak * 1.3).max(10.0));
+        self.max_scale = self.max_scale.max(nice_scale((self.peak * 1.3).max(10.0)));
         self.speed = speed;
         self.display_speed = if display_speed > 0.0 { display_speed } else { speed };
         self.progress = p;
@@ -103,7 +137,8 @@ impl SpeedGraph {
             return String::new();
         }
         let current = (self.progress * (BUCKETS - 1) as f64) as usize;
-        let active = if self.speed > 0.0 { self.speed } else { self.peak };
+        // The tip follows the averaged bucket, not the instantaneous rate.
+        let active = if self.buckets[self.last_bucket] > 0.0 { self.buckets[self.last_bucket] } else { self.peak };
         let mut d = format!("M 0 {h:.2}");
         for i in 0..=current {
             let x = (i as f64 / (BUCKETS - 1) as f64 * w).min(prog_x);
@@ -145,8 +180,15 @@ mod tests {
         m.sample(1.0, 10 << 20, false);
         assert!((m.current - 10.0).abs() < 1e-9);
         m.sample(2.0, 30 << 20, false);
-        assert!((m.current - 12.5).abs() < 1e-9);
-        assert!((m.displayed - 12.5).abs() < 1e-9);
+        assert!((m.current - 15.0).abs() < 1e-9);
+        assert!((m.displayed - 15.0).abs() < 1e-9);
+        // Older samples leave the 2 s window.
+        m.sample(3.0, 60 << 20, false);
+        assert!((m.current - 25.0).abs() < 1e-9);
+        // Bursty reports inside the window do not swing the rate.
+        m.sample(3.05, 80 << 20, false);
+        m.sample(3.10, 80 << 20, false);
+        assert!(m.current > 30.0 && m.current < 37.0, "{}", m.current);
     }
 
     #[test]
@@ -160,5 +202,20 @@ mod tests {
         assert!(g.reference_y(50.0) < 50.0);
         g.push(0.6, 2000.0, 2000.0);
         assert_eq!(g.max_scale, 2600.0);
+        // The scale never shrinks back.
+        g.push(0.7, 5.0, 5.0);
+        assert_eq!(g.max_scale, 2600.0);
+    }
+
+    #[test]
+    fn tip_is_averaged_within_a_bucket() {
+        let mut g = SpeedGraph::default();
+        g.push(0.5, 100.0, 100.0);
+        let y0 = g.area_path(120.0, 50.0);
+        // A wild swing inside the same bucket moves the tip by its share only.
+        g.push(0.5, 20.0, 100.0);
+        let tip = |path: &str| path.rsplit(" L ").nth(1).unwrap().split(' ').nth(1).unwrap().parse::<f64>().unwrap();
+        let (before, after) = (tip(&y0), tip(&g.area_path(120.0, 50.0)));
+        assert!((after - before).abs() < (g.y_for(20.0, 50.0) - g.y_for(100.0, 50.0)) * 0.6);
     }
 }
