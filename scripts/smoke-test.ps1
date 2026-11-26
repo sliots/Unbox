@@ -206,8 +206,17 @@ if (Test-Path -LiteralPath $sevenZip) {
         $r = Invoke-Unbox @('extract', $archive)
         Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
         Assert (Test-Path -LiteralPath (Join-Path $dir 'outer\root.txt')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
-        Assert (-not (Test-Path -LiteralPath (Join-Path $dir 'outer\movie.mp4'))) 'inner archive was delivered too'
+        # Like the source archive, the unpacked inner archive is kept unless recycling.
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'outer\movie.mp4')) 'inner archive was not kept'
+        Assert (Test-Path -LiteralPath $archive) 'source archive was removed'
         Assert-NoLeftovers $dir
+
+        $r = Invoke-Unbox @('extract', $archive, '--recycle')
+        Assert ($r.Code -eq 0) "recycle exit $($r.Code): $($r.Err)"
+        $out = Join-Path $dir 'outer (2)'
+        Assert (Test-Path -LiteralPath (Join-Path $out 'root.txt')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+        Assert (-not (Test-Path -LiteralPath (Join-Path $out 'movie.mp4'))) "inner archive was not recycled: $($r.Err)"
+        Assert (-not (Test-Path -LiteralPath $archive)) "source archive was not recycled: $($r.Err)"
     }
 
     Check 'lone document is not unpacked' {

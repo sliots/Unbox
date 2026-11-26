@@ -295,10 +295,18 @@ pub fn complete(mut request: CompletionRequest) -> CompletionResult {
         format!("已交付 {} 个文件；暂存目录清理延迟：{leftover}", post.files)
     };
 
-    if request.recycle && !request.volumes.is_empty() {
+    // Inner archives that were unpacked follow the source archive: kept by default,
+    // recycled with it when asked to.
+    let mut volumes = request.volumes.clone();
+    if request.recycle {
+        for item in final_manifest.items.iter().filter(|i| i.peeled && !i.is_dir) {
+            volumes.push(crate::win::capture_identity(&format!("{}\\{}", plan.final_dir, item.path)));
+        }
+    }
+    if request.recycle && !volumes.is_empty() {
         let digest = verify(&plan.final_dir, &final_manifest, VerifyMode::StructureAndDigest);
         result.recycle = Some(if digest.ok() {
-            recycle_volumes(&request.volumes)
+            recycle_volumes(&volumes)
         } else {
             RecycleResult::failed(format!("回收前摘要复核未通过，源包已保留：{}", digest.describe()))
         });

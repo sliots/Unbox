@@ -489,7 +489,10 @@ fn write_manifest(path: &str, delivery_root: &str, items: &[DeliveredItem]) -> b
     }
     let manifest = Manifest::new(
         delivery_root.to_string(),
-        items.iter().map(|i| ManifestItem { path: i.rel_disk_path.clone(), is_dir: i.is_dir, size: i.size, crc: i.crc }).collect(),
+        items
+            .iter()
+            .map(|i| ManifestItem { path: i.rel_disk_path.clone(), is_dir: i.is_dir, size: i.size, crc: i.crc, peeled: i.peeled })
+            .collect(),
     );
     let Ok(mut file) = std::fs::OpenOptions::new().write(true).create_new(true).open(path) else { return false };
     serde_json::to_writer(&mut file, &manifest).is_ok() && file.flush().is_ok() && file.sync_all().is_ok()
@@ -824,8 +827,11 @@ pub fn run(raw_args: &[OsString]) -> i32 {
     }
 
     // A lone delivered file that is an archive by content (whatever its extension) is
-    // unpacked as well, layer after layer. If a layer cannot be unpacked, the file is
-    // delivered as it is.
+    // unpacked as well, layer after layer. Like the source archive, every unpacked inner
+    // archive is kept (next to its content); the UI recycles it together with the source
+    // when the user asked for that. If a layer cannot be unpacked, the file is delivered
+    // as it is.
+    let mut kept: Vec<DeliveredItem> = Vec::new();
     let mut layers = 0;
     while !hard_failure && layers < MAX_PEELED_LAYERS && delivered.len() == 1 && !delivered[0].is_dir {
         let item = &delivered[0];
@@ -837,10 +843,21 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         let inner = expand_inner(&lib, &staging, &payload, effective_cp, false, cp_explicit, args.inner_budget, inner_guesses);
         match inner.kind {
             InnerKind::Success if !inner.items.is_empty() => {
-                // Drop the layer just unpacked: its own delivery directory, or the file.
-                if delivery_root.is_empty() {
-                    let _ = std::fs::remove_file(&payload);
-                } else {
+                // Move the archive just unpacked (and the ones kept before it) next to the
+                // new content, then drop the previous layer's directory.
+                let new_root = format!("{staging}\\{}", inner.delivery_root);
+                let mut moved = Vec::new();
+                for mut item in kept.drain(..).chain(std::iter::once(DeliveredItem { peeled: true, ..delivered[0].clone() })) {
+                    let name = Path::new(&item.disk_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let target = unbox_core::naming::unique_target_file(Path::new(&new_root), &name, |p| p.exists());
+                    if std::fs::rename(&item.disk_path, &target).is_ok() {
+                        item.rel_disk_path = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        item.disk_path = target.to_string_lossy().into_owned();
+                        moved.push(item);
+                    }
+                }
+                kept = moved;
+                if !delivery_root.is_empty() {
                     let _ = std::fs::remove_dir_all(format!("{staging}\\{delivery_root}"));
                 }
                 delivered = inner.items;
@@ -859,6 +876,8 @@ pub fn run(raw_args: &[OsString]) -> i32 {
             _ => break,
         }
     }
+
+    delivered.extend(kept);
 
     if hard_failure {
         if needs_inner {

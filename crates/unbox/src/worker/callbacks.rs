@@ -305,6 +305,8 @@ pub struct DeliveredItem {
     pub is_dir: bool,
     pub size: u64,
     pub crc: u32,
+    /// An inner archive kept next to its unpacked content.
+    pub peeled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -529,6 +531,7 @@ impl IArchiveExtractCallback_Impl for ExtractCallback_Impl {
                 is_dir: current.is_dir,
                 size: 0,
                 crc: 0,
+                peeled: false,
             };
             if let Some(out) = &current.out {
                 let mut out = out.lock().unwrap();

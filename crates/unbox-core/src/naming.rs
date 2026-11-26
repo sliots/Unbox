@@ -43,6 +43,22 @@ pub fn archive_base_name(file_name: &str) -> String {
     }
 }
 
+/// First of `parent\name.ext`, `parent\name (2).ext`, `parent\name (3).ext` … that does
+/// not exist.
+pub fn unique_target_file(parent: &Path, file_name: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
+    let (stem, ext) = match file_name.rfind('.') {
+        Some(dot) if dot > 0 => (&file_name[..dot], &file_name[dot..]),
+        _ => (file_name, ""),
+    };
+    let mut candidate = parent.join(file_name);
+    let mut n = 2;
+    while exists(&candidate) {
+        candidate = parent.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    candidate
+}
+
 /// First of `parent\base`, `parent\base (2)`, `parent\base (3)` … that does not exist.
 pub fn unique_target_directory(parent: &Path, base: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
     let candidate = parent.join(base);
@@ -111,6 +127,16 @@ pub fn is_same_volume_family(first: &Path, other: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unique_file_names() {
+        let taken = ["/r/a.7z", "/r/a (2).7z", "/r/noext"];
+        let exists = |p: &Path| taken.iter().any(|t| Path::new(t) == p);
+        assert_eq!(unique_target_file(Path::new("/r"), "a.7z", exists), PathBuf::from("/r/a (3).7z"));
+        assert_eq!(unique_target_file(Path::new("/r"), "noext", exists), PathBuf::from("/r/noext (2)"));
+        assert_eq!(unique_target_file(Path::new("/r"), ".hidden", exists), PathBuf::from("/r/.hidden"));
+    }
+
     use super::*;
 
     #[test]

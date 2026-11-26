@@ -19,6 +19,10 @@ pub struct ManifestItem {
     pub size: u64,
     #[serde(rename = "c")]
     pub crc: u32,
+    /// An archive found inside the archive and unpacked next to itself. It is delivered
+    /// like the source archive is kept, and recycled together with it when asked to.
+    #[serde(rename = "a", default, skip_serializing_if = "std::ops::Not::not")]
+    pub peeled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -239,7 +243,7 @@ mod tests {
     use super::*;
 
     fn item(path: &str, is_dir: bool, size: u64) -> ManifestItem {
-        ManifestItem { path: path.into(), is_dir, size, crc: 7 }
+        ManifestItem { path: path.into(), is_dir, size, crc: 7, peeled: false }
     }
 
     #[test]
