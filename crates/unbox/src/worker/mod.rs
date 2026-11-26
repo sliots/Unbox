@@ -18,11 +18,24 @@ use unbox_core::catalog::{classify, default_stream_name, ArchiveKind};
 use unbox_core::decode::{candidate_code_pages, code_page_label, decode_one, utf8_validity};
 use unbox_core::ipc::*;
 use unbox_core::manifest::{Manifest, ManifestItem};
-use unbox_core::raw_names::{looks_like_tar, looks_like_zip, read_raw_names};
+use unbox_core::raw_names::{looks_like_tar, looks_like_zip, read_raw_names, sniff_archive};
 use unbox_core::sanitize::{has_illegal_chars, is_mac_auxiliary, is_safe_relative_syntax, normalize_separators, sanitize_relative_path};
 use windows_core::Interface;
 
 const OUTER_TMP: &str = ".unbox_outer_tmp";
+/// How many archive-in-archive layers are unpacked after the outer one.
+const MAX_PEELED_LAYERS: u32 = 4;
+
+/// Guesses for an inner archive: the outer password first, it is the likeliest.
+fn password_guesses(outer: &ArchivePassword, guesses: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = outer.current_text().into_iter().collect();
+    for g in guesses {
+        if !all.contains(g) {
+            all.push(g.clone());
+        }
+    }
+    all
+}
 
 #[derive(Default)]
 struct Args {
@@ -347,14 +360,15 @@ fn expand_inner(
     if require_tar && !is_tar {
         return InnerResult::new(InnerKind::Failed, "inner_not_tar");
     }
-    if !is_tar && !is_zip && ![".7z", ".rar", ".zip", ".tar", ".iso"].contains(&ext.as_str()) {
+    let sniffed = sniff_archive(payload_path);
+    if !is_tar && !is_zip && sniffed.is_none() && ![".7z", ".rar", ".zip", ".tar", ".iso"].contains(&ext.as_str()) {
         return InnerResult::new(InnerKind::NotApplicable, "");
     }
     let Some(stream) = InFileStream::open(payload, false) else {
         return InnerResult::new(InnerKind::Failed, "cannot_open_inner_stream");
     };
     let password = (!require_tar).then(|| Arc::new(ArchivePassword::with_guesses(guesses)));
-    let hints: Vec<String> = if require_tar { vec!["tar".into()] } else { Vec::new() };
+    let hints: Vec<String> = if require_tar { vec!["tar".into()] } else { sniffed.map(|h| vec![h.to_string()]).unwrap_or_default() };
     let opened = open_with_password(lib, &stream, payload, &ext, cp, &hints, require_tar, password.as_ref());
     let (archive, open_cb) = match opened {
         Ok(opened) => (opened.archive, opened.callback),
@@ -769,12 +783,7 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         if delivered.len() == 1 && !delivered[0].is_dir {
             let payload = delivered[0].disk_path.clone();
             // The outer password (if any) is the likeliest one for the inner archive.
-            let inner_guesses = password.current_text().into_iter().chain(guesses.iter().cloned()).fold(Vec::new(), |mut all, g| {
-                if !all.contains(&g) {
-                    all.push(g);
-                }
-                all
-            });
+            let inner_guesses = password_guesses(&password, &guesses);
             let inner = expand_inner(&lib, &staging, &payload, effective_cp, compound_tar, cp_explicit, args.inner_budget, inner_guesses);
             match inner.kind {
                 InnerKind::Success => {
@@ -811,6 +820,43 @@ pub fn run(raw_args: &[OsString]) -> i32 {
             delivered.clear();
         } else {
             delivery_root = OUTER_TMP.into();
+        }
+    }
+
+    // A lone delivered file that is an archive by content (whatever its extension) is
+    // unpacked as well, layer after layer. If a layer cannot be unpacked, the file is
+    // delivered as it is.
+    let mut layers = 0;
+    while !hard_failure && layers < MAX_PEELED_LAYERS && delivered.len() == 1 && !delivered[0].is_dir {
+        let item = &delivered[0];
+        if item.rel_disk_path.contains(['\\', '/']) || sniff_archive(Path::new(&item.disk_path)).is_none() {
+            break;
+        }
+        let payload = item.disk_path.clone();
+        let inner_guesses = password_guesses(&password, &guesses);
+        let inner = expand_inner(&lib, &staging, &payload, effective_cp, false, cp_explicit, args.inner_budget, inner_guesses);
+        match inner.kind {
+            InnerKind::Success if !inner.items.is_empty() => {
+                // Drop the layer just unpacked: its own delivery directory, or the file.
+                if delivery_root.is_empty() {
+                    let _ = std::fs::remove_file(&payload);
+                } else {
+                    let _ = std::fs::remove_dir_all(format!("{staging}\\{delivery_root}"));
+                }
+                delivered = inner.items;
+                total_items = inner.total_items;
+                policy_filtered += inner.policy_filtered;
+                completed = inner.completed;
+                delivery_root = inner.delivery_root;
+                unsafe_items += inner.unsafe_items;
+                missing += inner.missing;
+                layers += 1;
+            }
+            InnerKind::Canceled => {
+                control().send(&WorkerEvent::Canceled);
+                return 0;
+            }
+            _ => break,
         }
     }
 

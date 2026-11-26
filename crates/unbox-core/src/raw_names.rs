@@ -39,6 +39,90 @@ pub fn looks_like_tar(path: &Path) -> bool {
     &hdr[257..262] == b"ustar" || hdr.iter().all(|b| *b == 0) || tar_checksum_valid(&hdr)
 }
 
+/// Formats that are ZIP files underneath but are documents or packages in their own
+/// right: a lone file like this is delivered as is, never unpacked.
+const ZIP_CONTAINER_EXTENSIONS: &[&str] = &[
+    "docx",
+    "docm",
+    "dotx",
+    "xlsx",
+    "xlsm",
+    "xltx",
+    "pptx",
+    "pptm",
+    "potx",
+    "vsdx",
+    "odt",
+    "ods",
+    "odp",
+    "odg",
+    "epub",
+    "jar",
+    "war",
+    "ear",
+    "apk",
+    "aab",
+    "xapk",
+    "ipa",
+    "xpi",
+    "crx",
+    "vsix",
+    "nupkg",
+    "whl",
+    "appx",
+    "msix",
+    "appxbundle",
+    "msixbundle",
+    "3mf",
+    "kmz",
+    "usdz",
+    "sketch",
+    "ora",
+    "cbz",
+    "key",
+    "pages",
+    "numbers",
+    "mcpack",
+    "mcworld",
+];
+
+/// Comic-book archives are read as they are.
+const KEEP_EXTENSIONS: &[&str] = &["cbr", "cb7", "cbt"];
+
+/// The 7-Zip handler for a file that is an archive by content, whatever its name says
+/// (shared archives are often renamed to hide them). Only real archive containers are
+/// recognised: executables, disk images and ZIP-based documents are left alone.
+pub fn sniff_archive(path: &Path) -> Option<&'static str> {
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if KEEP_EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
+    let mut head = Vec::with_capacity(512);
+    File::open(path).ok()?.take(512).read_to_end(&mut head).ok()?;
+    let starts = |magic: &[u8]| head.starts_with(magic);
+    if starts(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]) {
+        Some("7z")
+    } else if starts(b"Rar!\x1A\x07\x01\x00") {
+        Some("Rar5")
+    } else if starts(b"Rar!\x1A\x07\x00") {
+        Some("Rar")
+    } else if starts(b"PK\x03\x04") || starts(b"PK\x05\x06") || starts(b"PK\x07\x08") {
+        (!ZIP_CONTAINER_EXTENSIONS.contains(&ext.as_str())).then_some("zip")
+    } else if starts(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+        Some("xz")
+    } else if starts(&[0x1F, 0x8B, 0x08]) {
+        Some("gzip")
+    } else if starts(b"BZh") && head.len() > 3 && (b'1'..=b'9').contains(&head[3]) {
+        Some("bzip2")
+    } else if starts(&[0x28, 0xB5, 0x2F, 0xFD]) {
+        Some("zstd")
+    } else if head.len() == 512 && (&head[257..262] == b"ustar" || (head.iter().any(|b| *b != 0) && tar_checksum_valid(&head))) {
+        Some("tar")
+    } else {
+        None
+    }
+}
+
 fn parse_octal(p: &[u8]) -> u64 {
     if !p.is_empty() && p[0] & 0x80 != 0 {
         return p[1..].iter().fold((p[0] & 0x7F) as u64, |v, b| (v << 8) | *b as u64);
@@ -278,6 +362,27 @@ pub fn read_raw_names(path: &Path) -> Option<Vec<RawEntry>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn sniff_by_content_not_name() {
+        let dir = std::env::temp_dir().join(format!("unbox-sniff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p
+        };
+        assert_eq!(sniff_archive(&write("movie.mp4", &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0, 4])), Some("7z"));
+        assert_eq!(sniff_archive(&write("a.jpg", b"Rar!\x1A\x07\x01\x00rest")), Some("Rar5"));
+        assert_eq!(sniff_archive(&write("noext", b"PK\x03\x04....")), Some("zip"));
+        assert_eq!(sniff_archive(&write("report.docx", b"PK\x03\x04....")), None);
+        assert_eq!(sniff_archive(&write("book.cbr", b"Rar!\x1A\x07\x00")), None);
+        assert_eq!(sniff_archive(&write("tool.exe", b"MZ\x90\x00")), None);
+        assert_eq!(sniff_archive(&write("notes.txt", b"hello")), None);
+        assert_eq!(sniff_archive(&write("zeros.bin", &[0u8; 1024])), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::io::Write;
 

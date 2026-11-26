@@ -183,6 +183,45 @@ if (Test-Path -LiteralPath $sevenZip) {
         Assert ($good.Code -eq 0) "exit $($good.Code): $($good.Err)"
         Assert (Test-Path -LiteralPath (Join-Path $dir 'locked\root.txt')) 'missing root.txt'
     }
+
+    Check 'password guessed from a folder three levels up' {
+        $dir = Join-Path $work 'pw5\Top Key\a\b'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $archive = Join-Path $dir 'deep.7z'
+        New-Encrypted $archive 'Key' @('-mhe=on')
+        $r = Invoke-Unbox @('extract', $archive)
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'deep\root.txt')) 'missing root.txt'
+    }
+
+    Check 'disguised archive inside an archive is unpacked' {
+        $dir = Join-Path $work 'nested'
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        $inner = Join-Path $dir 'payload.7z'
+        & $sevenZip a -bso0 -bsp0 $inner (Join-Path $src '*') | Out-Null
+        Move-Item -LiteralPath $inner -Destination (Join-Path $dir 'movie.mp4')
+        $archive = Join-Path $dir 'outer.zip'
+        & $sevenZip a -bso0 -bsp0 $archive (Join-Path $dir 'movie.mp4') | Out-Null
+        Remove-Item -LiteralPath (Join-Path $dir 'movie.mp4')
+        $r = Invoke-Unbox @('extract', $archive)
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'outer\root.txt')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+        Assert (-not (Test-Path -LiteralPath (Join-Path $dir 'outer\movie.mp4'))) 'inner archive was delivered too'
+        Assert-NoLeftovers $dir
+    }
+
+    Check 'lone document is not unpacked' {
+        $dir = Join-Path $work 'doc'
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        $docx = Join-Path $dir 'report.docx'
+        & $sevenZip a -bso0 -bsp0 -tzip $docx (Join-Path $src 'root.txt') | Out-Null
+        $archive = Join-Path $dir 'doc.zip'
+        & $sevenZip a -bso0 -bsp0 $archive $docx | Out-Null
+        Remove-Item -LiteralPath $docx
+        $r = Invoke-Unbox @('extract', $archive)
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'doc\report.docx')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+    }
 } else {
     Write-Warning "7-Zip not found at $sevenZip; password checks skipped."
 }
