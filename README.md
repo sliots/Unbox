@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/sliots/Unbox/releases">
-    <img src="https://img.shields.io/badge/Version-v2.0.8-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
+    <img src="https://img.shields.io/badge/Version-v2.0.9-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
   </a>
   <img src="https://img.shields.io/badge/Platform-Windows_11_%7C_10-0078D4?style=for-the-badge&logo=windows&labelColor=000000" alt="Platform">
   <img src="https://img.shields.io/badge/Core-Rust_%7C_Slint-B7410E?style=for-the-badge&logo=rust&labelColor=000000" alt="Core">
@@ -40,12 +40,15 @@
 |:--|:--|:--|
 | 外壳 | WPF / .NET 10（需安装桌面运行时） | **Rust + Slint**（Skia 渲染），`unbox.exe` 自带 VC++ 运行库，无需额外安装 |
 | 解压核心 | 独立 C++ `UnzipWorker.exe` | 同一个 `unbox.exe --worker` 子进程，仍隔离加载 7z.dll，并由任务对象托管 |
-| 文件关联 | PowerShell 脚本 + `安装与卸载.cmd` | `unbox register / unregister / status`，图标内嵌在 exe 中 |
+| 文件关联 | PowerShell 脚本 + `安装与卸载.cmd` | `unbox register / unregister / status`，图标内嵌在 exe 中；同时添加右键菜单“用 Unbox 解压”“用 Unbox 解压到当前文件夹”（Windows 11 在“显示更多选项”里） |
+| 多个压缩包 | 每个一个窗口 | 一次打开多个（多选后回车或右键解压，或解压途中再双击一个）时**在同一个窗口里依次解压**，显示“2/5”；标题栏的关闭按钮会放弃整个队列 |
 | 分发 | 手动下载便携包 | GitHub Actions 自动构建、测试、发布；**支持 Scoop 安装** |
+| 进度 | — | 解分卷时显示“分卷 3/7”，解内层压缩包时显示“第 2 层”；速度按 2 秒窗口平均，曲线不再来回摆动 |
 | 套娃压缩包 | — | 解出来只有一个文件且按内容判断是压缩包（不看后缀名，跳过 docx / apk 等文档与安装包）时继续解开，最多 4 层；内层压缩包与源包同等对待：默认保留在解压结果里，勾选“移入回收站”时一并回收 |
 | 分卷 | — | `.7z.001` / `.zip.001` 等编号分卷**直接跨卷读取**，不再先拼出一份完整副本；打开任意一卷（`.002`、`.part3.rar`、`.z01`、`.r00`）都会从首卷开始；缺卷时直接指出缺的是哪一卷；勾选“移入回收站”时回收全部分卷 |
 | 命令行 | — | `unbox extract <压缩包>` 无窗口解压（同一条校验与提交路径） |
-| 密码 | 手动输入 | **先自动尝试**压缩包名、逐级向上每一层文件夹名及其按空格拆出的词，猜中直接解压；都不对再询问，输错可重试 |
+| 密码 | 手动输入 | **先自动尝试**压缩包名、逐级向上每一层文件夹名及其按空格拆出的词，猜中直接解压；都不对再询问，输错可重试；手动输入的密码会在多个文件上验证，个别文件损坏不会被误判成密码错误，连错 3 次且都像数据损坏时会提示压缩包可能已损坏；内层压缩包要密码时可以选“保留，不解这一层”，外层内容照常交付 |
+| 出错时 | 只显示错误 | 完整显示错误说明，可**复制详情**；空间不足时写明需要多少、可用多少，并可**换个位置解压** |
 
 ### 界面
 
@@ -94,7 +97,7 @@ scoop install https://raw.githubusercontent.com/sliots/Unbox/rust/bucket/unbox.j
 
 ### 便携包
 
-从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.8-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
+从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.9-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
 
 ```powershell
 .\unbox.exe register      # 登记关联并打开“默认应用”设置
@@ -111,7 +114,7 @@ unbox extract D:\Downloads\project.7z --password secret
 # 成功时在标准输出打印目标目录；退出码 0 成功 / 2 部分完成 / 1 失败
 ```
 
-`--skip-invalid` 跳过非法文件名（默认批量重命名），`--cp 936` 指定文件名代码页，`--recycle` 校验通过后回收源包。
+`--skip-invalid` 跳过非法文件名（默认批量重命名），`--cp 936` 指定文件名代码页，`--recycle` 校验通过后回收源包，`--here` 直接解压到压缩包所在文件夹（同名不覆盖，自动加 ` (2)`），`--to <文件夹>` 解压到指定文件夹。窗口模式同样接受 `--here` 与 `--to`。
 
 ## 🗂️ 支持的格式
 
@@ -144,7 +147,7 @@ unbox extract D:\Downloads\project.7z --password secret
 cargo build --release -p unbox            # target\release\unbox.exe
 copy assets\7z.dll target\release\        # 7z.dll 需与 unbox.exe 同目录
 .\scripts\package.ps1                     # 生成 dist\Unbox-v<版本>-win-x64.zip 与 SHA256SUMS.txt
-.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.8-win-x64
+.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.9-win-x64
 ```
 
 在 macOS / Linux 上交叉编译（需要 LLVM 提供 `clang-cl`、`llvm-rc`，首次会自动下载 MSVC CRT 与 Windows SDK）：
@@ -171,7 +174,7 @@ bucket/unbox.json   Scoop 清单（发布时由 CI 自动更新版本与哈希�
 - **发布**（`.github/workflows/release.yml`）：推送与 `Cargo.toml` 版本一致的标签即可：
 
   ```bash
-  git tag v2.0.8 && git push origin v2.0.8
+  git tag v2.0.9 && git push origin v2.0.9
   ```
 
   工作流会构建、测试、创建 GitHub Release（zip + SHA256SUMS.txt），并把新版本号与哈希写回 `rust` 分支的 `bucket/unbox.json`。

@@ -129,6 +129,37 @@ Check 'damaged archive is rejected without leftovers' {
     Assert-NoLeftovers $dir
 }
 
+Check 'extract here spreads the content into the folder' {
+    $dir = Join-Path $work 'here'
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $archive = Join-Path $dir 'loose.zip'
+    Compress-Archive -Path (Join-Path $src '*') -DestinationPath $archive
+    Set-Content -LiteralPath (Join-Path $dir 'root.txt') -Value 'already here'
+    $r = Invoke-Unbox @('extract', $archive, '--here')
+    Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+    Assert ($r.Out -eq $dir) "target was '$($r.Out)'"
+    Assert (Test-Path -LiteralPath (Join-Path $dir '中文目录\深层\data.bin')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+    Assert ((Get-Content -LiteralPath (Join-Path $dir 'root.txt') -Raw).Trim() -eq 'already here') 'existing file was overwritten'
+    Assert (Test-Path -LiteralPath (Join-Path $dir 'root (2).txt')) 'clashing file was not renamed'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $dir 'loose'))) 'target folder left behind'
+    Assert-NoLeftovers $dir
+}
+
+Check 'extract into another folder' {
+    $dir = Join-Path $work 'to'
+    $dest = Join-Path $work 'to-dest'
+    New-Item -ItemType Directory -Path $dir, $dest | Out-Null
+    $archive = Join-Path $dir 'moved.zip'
+    Copy-Item -LiteralPath $zip -Destination $archive
+    $r = Invoke-Unbox @('extract', $archive, '--to', $dest)
+    Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+    Assert ($r.Out -eq (Join-Path $dest 'moved')) "target was '$($r.Out)'"
+    Assert (Test-Path -LiteralPath (Join-Path $dest 'moved\root.txt')) 'missing root.txt'
+    Assert (Test-Path -LiteralPath $archive) 'source archive was removed'
+    Assert-NoLeftovers $dir
+    Assert-NoLeftovers $dest
+}
+
 # Encrypted archives need the 7-Zip command line (preinstalled on GitHub's Windows images).
 $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
 function New-Encrypted([string]$Archive, [string]$Password, [string[]]$Switches) {
@@ -217,6 +248,20 @@ if (Test-Path -LiteralPath $sevenZip) {
         Assert (Test-Path -LiteralPath (Join-Path $out 'root.txt')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
         Assert (-not (Test-Path -LiteralPath (Join-Path $out 'movie.mp4'))) "inner archive was not recycled: $($r.Err)"
         Assert (-not (Test-Path -LiteralPath $archive)) "source archive was not recycled: $($r.Err)"
+    }
+
+    Check 'inner archive with an unknown password is kept as it is' {
+        $dir = Join-Path $work 'inner-locked'
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        $inner = Join-Path $dir 'vault.7z'
+        New-Encrypted $inner 'Not-Guessable-7' @('-mhe=on')
+        $archive = Join-Path $dir 'carrier.zip'
+        & $sevenZip a -bso0 -bsp0 $archive $inner | Out-Null
+        Remove-Item -LiteralPath $inner
+        $r = Invoke-Unbox @('extract', $archive)
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'carrier\vault.7z')) "unexpected layout: $(Get-ChildItem -Recurse -Name $dir | Out-String)"
+        Assert-NoLeftovers $dir
     }
 
     Check 'lone document is not unpacked' {
@@ -319,9 +364,13 @@ Check 'register / status / unregister' {
     Assert ($s.Out -match '完整登记') "status: $($s.Out)"
     $icon = (Get-ItemProperty 'HKCU:\Software\Classes\Unbox.7z\DefaultIcon').'(default)'
     Assert ($icon -match 'unbox\.exe",-\d+$') "icon: $icon"
+    $menu = 'HKCU:\Software\Classes\SystemFileAssociations\.7z\shell\Unbox.ExtractHere'
+    $verb = (Get-ItemProperty "$menu\command").'(default)'
+    Assert ($verb -match 'unbox\.exe" --here "%1"$') "context menu: $verb"
     $u = Invoke-Unbox @('unregister')
     Assert ($u.Code -eq 0) "unregister exit $($u.Code): $($u.Err)"
     Assert (-not (Test-Path 'HKCU:\Software\Classes\Unbox.7z')) 'ProgID left behind'
+    Assert (-not (Test-Path $menu)) 'context menu left behind'
 }
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

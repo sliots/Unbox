@@ -36,6 +36,8 @@ pub struct CompletionResult {
     pub zone_marked: usize,
     pub kept_staging: String,
     pub recycle: Option<RecycleResult>,
+    /// "Extract here": the entries now directly in the destination folder.
+    pub spread: Vec<String>,
 }
 
 fn trim(path: &str) -> String {
@@ -311,5 +313,45 @@ pub fn complete(mut request: CompletionRequest) -> CompletionResult {
             RecycleResult::failed(format!("回收前摘要复核未通过，源包已保留：{}", digest.describe()))
         });
     }
+
+    // "Extract here": the verified folder is spread into the destination. An archive
+    // whose only entry is its own folder already is that folder, so it stays as it is.
+    if plan.here && prefix.is_none() {
+        let (spread, problem) = spread_into(&plan.final_dir, &plan.parent);
+        if problem.is_none() {
+            result.final_dir = plan.parent.clone();
+        } else {
+            result.summary.push_str(&format!("；未能全部移到当前文件夹，其余仍在「{}」中", plan.target_name));
+        }
+        result.spread = spread;
+    }
     result
+}
+
+/// Move every entry of `folder` into `destination` (renaming on a clash), then remove
+/// the emptied folder. Returns the moved entries and the first problem, if any.
+fn spread_into(folder: &str, destination: &str) -> (Vec<String>, Option<String>) {
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(e) => return (Vec::new(), Some(e.to_string())),
+    };
+    let mut moved = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { return (moved, Some("无法枚举目录".into())) };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let parent = std::path::Path::new(destination);
+        let target = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            unbox_core::naming::unique_target_directory(parent, &name, exists)
+        } else {
+            unbox_core::naming::unique_target_file(parent, &name, exists)
+        };
+        if let Err(e) = std::fs::rename(entry.path(), &target) {
+            return (moved, Some(e.to_string()));
+        }
+        moved.push(target.to_string_lossy().into_owned());
+    }
+    match std::fs::remove_dir(folder) {
+        Ok(()) => (moved, None),
+        Err(e) => (moved, Some(e.to_string())),
+    }
 }

@@ -227,3 +227,34 @@ pub fn resolve_network_drive(full: &str) -> String {
 pub fn fs_strip(path: &Path) -> String {
     unbox_core::sanitize::strip_extended_prefix(&path.to_string_lossy())
 }
+
+/// Put `text` on the clipboard as Unicode text.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 2;
+    let data = wide(text);
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let memory = GlobalAlloc(GMEM_MOVEABLE, data.len() * 2);
+        let mut ok = false;
+        if !memory.is_null() {
+            let target = GlobalLock(memory) as *mut u16;
+            if !target.is_null() {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), target, data.len());
+                GlobalUnlock(memory);
+                ok = !SetClipboardData(CF_UNICODETEXT, memory as _).is_null();
+            }
+            if !ok {
+                GlobalFree(memory);
+            }
+        }
+        CloseClipboard();
+        ok
+    }
+}

@@ -14,6 +14,8 @@ pub struct ExtractionPlan {
     pub target_name: String,
     pub final_dir: String,
     pub staging: String,
+    /// Spread the content into `parent` instead of keeping the target folder.
+    pub here: bool,
 }
 
 pub fn random_token() -> String {
@@ -45,26 +47,35 @@ pub fn first_volume(archive: &Path) -> PathBuf {
 }
 
 impl ExtractionPlan {
-    pub fn new(archive: &Path) -> Self {
+    /// Plan for `archive`, extracted into `to` (default: its own folder); `here` spreads
+    /// the content into that folder instead of a folder named after the archive.
+    pub fn create(archive: &Path, to: Option<&Path>, here: bool) -> Self {
         let full = full_path_name(archive.as_os_str()).unwrap_or_else(|| archive.to_string_lossy().into_owned());
         // The worker and the verifier compare against handle final paths, which use UNC
         // names for mapped network drives.
         let source = resolve_network_drive(&full);
         let path = PathBuf::from(&source);
-        let parent = path
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned());
-        // Use the physical spelling of the folder (case, 8.3 names, mapped drives) so it
-        // matches the final paths that file handles report later.
-        let parent = std::fs::canonicalize(&parent).map(|p| crate::win::fs_strip(&p)).unwrap_or(parent);
+        // Use the physical spelling of folders (case, 8.3 names, mapped drives) so they
+        // match the final paths that file handles report later.
+        let physical = |dir: String| std::fs::canonicalize(&dir).map(|p| crate::win::fs_strip(&p)).unwrap_or(dir);
+        let source_dir = physical(
+            path.parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned()),
+        );
         let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let source = Path::new(&parent).join(&file_name).to_string_lossy().into_owned();
+        let source = Path::new(&source_dir).join(&file_name).to_string_lossy().into_owned();
+        let parent = match to {
+            Some(dir) => {
+                physical(resolve_network_drive(&full_path_name(dir.as_os_str()).unwrap_or_else(|| dir.to_string_lossy().into_owned())))
+            }
+            None => source_dir,
+        };
         let final_dir = unique_target(&parent, &archive_base_name(&file_name));
         let target_name = Path::new(&final_dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let staging = Path::new(&parent).join(format!(".unzip_staging_{}", random_token())).to_string_lossy().into_owned();
-        ExtractionPlan { source, parent, target_name, final_dir, staging }
+        ExtractionPlan { source, parent, target_name, final_dir, staging, here }
     }
 
     pub fn source_name(&self) -> String {

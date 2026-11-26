@@ -3,7 +3,8 @@
 
 use super::*;
 
-const USAGE: &str = "用法: unbox extract <压缩包> [--password <密码>] [--skip-invalid] [--cp <代码页>] [--recycle]";
+const USAGE: &str =
+    "用法: unbox extract <压缩包> [--password <密码>] [--skip-invalid] [--cp <代码页>] [--recycle] [--here] [--to <文件夹>]";
 
 struct Options {
     archive: Option<PathBuf>,
@@ -11,10 +12,12 @@ struct Options {
     skip_invalid: bool,
     code_page: u32,
     recycle: bool,
+    here: bool,
+    to: Option<PathBuf>,
 }
 
 fn parse(args: &[std::ffi::OsString]) -> Result<Options, String> {
-    let mut options = Options { archive: None, password: None, skip_invalid: false, code_page: 0, recycle: false };
+    let mut options = Options { archive: None, password: None, skip_invalid: false, code_page: 0, recycle: false, here: false, to: None };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.to_str() {
@@ -24,6 +27,8 @@ fn parse(args: &[std::ffi::OsString]) -> Result<Options, String> {
             }
             Some("--skip-invalid") => options.skip_invalid = true,
             Some("--recycle") => options.recycle = true,
+            Some("--here") => options.here = true,
+            Some("--to") => options.to = Some(PathBuf::from(iter.next().ok_or(USAGE)?)),
             _ if options.archive.is_none() => options.archive = Some(PathBuf::from(arg)),
             _ => return Err(USAGE.into()),
         }
@@ -45,7 +50,7 @@ pub fn extract_cli(args: &[std::ffi::OsString]) -> i32 {
         return 1;
     };
     let archive = plan::first_volume(&archive);
-    let plan = ExtractionPlan::new(&archive);
+    let plan = ExtractionPlan::create(&archive, options.to.as_deref(), options.here);
     if let Err(e) = std::fs::create_dir_all(&plan.staging) {
         eprintln!("无法创建暂存目录：{e}");
         return 1;
@@ -88,6 +93,10 @@ pub fn extract_cli(args: &[std::ffi::OsString]) -> i32 {
                 eprintln!("文件名编码不确定，按 {} 解码。", unbox_core::decode::code_page_label(cp));
                 worker.send(&WorkerCommand::EncodingResponse { cp });
             }
+            // An inner archive nobody can open is delivered as it is.
+            WorkerEvent::PasswordRequest { inner: true, .. } if options.password.is_none() || password_sent => {
+                worker.send(&WorkerCommand::PasswordSkip);
+            }
             WorkerEvent::PasswordRequest { .. } => match (&options.password, password_sent) {
                 (Some(password), false) => {
                     password_sent = true;
@@ -97,7 +106,11 @@ pub fn extract_cli(args: &[std::ffi::OsString]) -> i32 {
                 (None, _) => return fail("压缩包需要密码，自动尝试的密码都不对（使用 --password 提供）"),
             },
             WorkerEvent::Error { message, error_reason } => {
-                let message = error_reason.map(|r| describe_failure(&r, -1, "failed")).unwrap_or(message);
+                let message = match error_reason {
+                    Some(r) if r == "insufficient_disk_space" => format!("{message}{}", describe_failure(&r, -1, "failed")),
+                    Some(r) => describe_failure(&r, -1, "failed"),
+                    None => message,
+                };
                 return fail(&message);
             }
             WorkerEvent::Canceled => return fail("已取消"),
@@ -112,14 +125,14 @@ pub fn extract_cli(args: &[std::ffi::OsString]) -> i32 {
                 });
                 remove_manifest(&manifest);
                 return match outcome {
-                    FinalOutcome::Failed { detail, keep_staging } => {
+                    FinalOutcome::Failed { detail, keep_staging, .. } => {
                         if !keep_staging {
                             plan.cleanup_staging();
                         }
                         eprintln!("解压未完成：{detail}");
                         1
                     }
-                    FinalOutcome::Delivered { final_dir, notes, partial, recycle } => {
+                    FinalOutcome::Delivered { final_dir, notes, partial, recycle, .. } => {
                         println!("{final_dir}");
                         eprintln!("{notes}");
                         if let Some(r) = recycle {

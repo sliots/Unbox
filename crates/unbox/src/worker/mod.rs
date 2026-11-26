@@ -209,6 +209,8 @@ fn encoding_options(preferred: u32, archive_path: &str) -> Vec<EncodingOption> {
 
 enum OpenFailure {
     Canceled,
+    /// The user left this (inner) archive as it is.
+    Skipped,
     Unrecognized,
 }
 
@@ -247,26 +249,38 @@ fn open_with_password(
             return Err(OpenFailure::Canceled);
         }
         match password {
-            Some(p) if p.asked() => p.reject(),
+            Some(p) if p.skipped() => return Err(OpenFailure::Skipped),
+            // Encrypted headers that do not decode: a wrong password or damaged data.
+            Some(p) if p.asked() => p.reject(false),
             _ => return Err(OpenFailure::Unrecognized),
         }
     }
 }
 
-/// Settle the password before extraction by decoding one encrypted item: guesses are
-/// tried silently, then the user is asked until a password decodes it. Returns `false`
-/// when canceled.
-fn verify_password(archive: &IInArchive, count: u32, password: &ArchivePassword) -> bool {
+enum Verified {
+    Yes,
+    Canceled,
+    /// The user left this (inner) archive as it is.
+    Skipped,
+}
+
+/// How many encrypted items a password typed by the user is tried on before it is
+/// called wrong: a damaged item must not make a right password look wrong.
+const PROBE_ITEMS: usize = 3;
+
+/// Settle the password before extraction by decoding encrypted items: guesses are
+/// tried silently, then the user is asked until a password decodes one.
+fn verify_password(archive: &IInArchive, count: u32, password: &ArchivePassword) -> Verified {
     if password.has_current() {
-        return true; // The encrypted headers already proved it.
+        return Verified::Yes; // The encrypted headers already proved it.
     }
-    // The cheapest item to decode: the first one of a solid stream, else the smallest.
+    // The cheapest items to decode: the first ones of a solid stream, else the smallest.
     let mut solid = PropVariant::default();
     unsafe {
         let _ = archive.GetArchiveProperty(prop::SOLID, &mut solid);
     }
     let solid = solid.as_bool();
-    let mut best: Option<(u64, u32)> = None;
+    let mut candidates: Vec<(u64, u32)> = Vec::new();
     for index in 0..count {
         if !item_property(archive, index, prop::ENCRYPTED).as_bool() || item_property(archive, index, prop::IS_DIR).as_bool() {
             continue;
@@ -275,23 +289,49 @@ fn verify_password(archive: &IInArchive, count: u32, password: &ArchivePassword)
         if size == Some(0) {
             continue;
         }
-        let key = if solid { index as u64 } else { size.unwrap_or(u64::MAX) };
-        if best.is_none_or(|(k, _)| key < k) {
-            best = Some((key, index));
-        }
+        candidates.push((if solid { index as u64 } else { size.unwrap_or(u64::MAX) }, index));
     }
-    let Some((_, index)) = best else {
+    candidates.sort_unstable();
+    if solid {
+        // Items of one solid block share a fate; a later block is a second opinion.
+        candidates.truncate(1);
+    }
+    candidates.truncate(PROBE_ITEMS);
+    if candidates.is_empty() {
         // Nothing to verify against: a password, if any, comes from the user only.
         password.drop_guesses();
-        return true;
-    };
+        return Verified::Yes;
+    }
     loop {
-        let Some(candidate) = password.get() else { return false };
-        match probe_password(archive, index, candidate) {
-            Probe::Correct | Probe::Unknown => return true,
-            Probe::Wrong if control().canceled() => return false,
-            Probe::Wrong => password.reject(),
+        let Some(candidate) = password.get() else {
+            return if password.skipped() { Verified::Skipped } else { Verified::Canceled };
+        };
+        let tries = if password.current_from_user() { candidates.len() } else { 1 };
+        let mut definite = false;
+        let mut correct = false;
+        for &(_, index) in candidates.iter().take(tries) {
+            match probe_password(archive, index, candidate.clone()) {
+                Probe::Correct | Probe::Unknown => {
+                    correct = true;
+                    break;
+                }
+                Probe::Wrong { definite: d } => {
+                    definite |= d;
+                    if d {
+                        break;
+                    }
+                }
+            }
         }
+        let mut candidate = candidate;
+        candidate.iter_mut().for_each(|c| unsafe { std::ptr::write_volatile(c, 0) });
+        if correct {
+            return Verified::Yes;
+        }
+        if control().canceled() {
+            return Verified::Canceled;
+        }
+        password.reject(definite);
     }
 }
 
@@ -301,6 +341,7 @@ fn verify_password(archive: &IInArchive, count: u32, password: &ArchivePassword)
 
 #[derive(PartialEq, Eq)]
 enum InnerKind {
+    /// Not an archive, or the user left it as it is.
     NotApplicable,
     Success,
     Failed,
@@ -351,6 +392,7 @@ fn expand_inner(
     strict: bool,
     explicit_budget: u64,
     guesses: Vec<String>,
+    layer: u32,
 ) -> InnerResult {
     let payload_path = Path::new(payload);
     let is_tar = looks_like_tar(payload_path);
@@ -367,12 +409,13 @@ fn expand_inner(
     let Some(stream) = InFileStream::open(payload, false) else {
         return InnerResult::new(InnerKind::Failed, "cannot_open_inner_stream");
     };
-    let password = (!require_tar).then(|| Arc::new(ArchivePassword::with_guesses(guesses)));
+    let password = (!require_tar).then(|| Arc::new(ArchivePassword::with_guesses(guesses).for_inner_archive()));
     let hints: Vec<String> = if require_tar { vec!["tar".into()] } else { sniffed.map(|h| vec![h.to_string()]).unwrap_or_default() };
     let opened = open_with_password(lib, &stream, payload, &ext, cp, &hints, require_tar, password.as_ref());
     let (archive, open_cb) = match opened {
         Ok(opened) => (opened.archive, opened.callback),
         Err(OpenFailure::Canceled) => return InnerResult::new(InnerKind::Canceled, ""),
+        Err(OpenFailure::Skipped) => return InnerResult::new(InnerKind::NotApplicable, ""),
         Err(OpenFailure::Unrecognized) => return InnerResult::new(InnerKind::Failed, "unrecognized_or_corrupted_inner_archive"),
     };
     let mut count = 0u32;
@@ -383,11 +426,16 @@ fn expand_inner(
         return InnerResult::new(InnerKind::Failed, "corrupted_inner_archive");
     }
     if let Some(password) = &password {
-        if !verify_password(&archive, count, password) {
+        let kind = match verify_password(&archive, count, password) {
+            Verified::Yes => None,
+            Verified::Canceled => Some(InnerKind::Canceled),
+            Verified::Skipped => Some(InnerKind::NotApplicable),
+        };
+        if let Some(kind) = kind {
             unsafe {
                 let _ = archive.Close();
             }
-            return InnerResult::new(InnerKind::Canceled, "");
+            return InnerResult::new(kind, "");
         }
     }
 
@@ -427,7 +475,7 @@ fn expand_inner(
         target_paths: plan.target_paths.clone(),
         to_extract: plan.to_extract.clone(),
         total_bytes: plan.declared_bytes,
-        progress: Arc::new(Progress::new(Phase::Inner, plan.all_sizes_known)),
+        progress: Arc::new(Progress::new(Phase::Inner, plan.all_sizes_known).at_layer(layer)),
         password,
         budget: budget.clone(),
     });
@@ -630,7 +678,7 @@ pub fn run(raw_args: &[OsString]) -> i32 {
             control().send(&WorkerEvent::Canceled);
             return 0;
         }
-        Err(OpenFailure::Unrecognized) => {
+        Err(OpenFailure::Unrecognized | OpenFailure::Skipped) => {
             error("Unsupported or unrecognized archive format", None);
             return 4;
         }
@@ -652,7 +700,7 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         error("Archive is damaged or incomplete", None);
         return 5;
     }
-    if !verify_password(&archive, count, &password) {
+    if !matches!(verify_password(&archive, count, &password), Verified::Yes) {
         close(&archive);
         control().send(&WorkerEvent::Canceled);
         return 0;
@@ -706,9 +754,13 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         }
     }
 
-    if !has_disk_space(&args.staging, plan.declared_bytes.max(args.budget)) {
+    let needed = plan.declared_bytes.max(args.budget);
+    if !has_disk_space(&args.staging, needed) {
         close(&archive);
-        error("Insufficient disk space in staging directory", Some("insufficient_disk_space"));
+        let free = disk_free(Path::new(&args.staging)).unwrap_or(0);
+        let drive = Path::new(&args.staging).components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+        let detail = format!("需要约 {}，{drive} 可用 {}。", unbox_core::text::format_bytes(needed), unbox_core::text::format_bytes(free));
+        error(detail, Some("insufficient_disk_space"));
         return 7;
     }
 
@@ -866,7 +918,8 @@ pub fn run(raw_args: &[OsString]) -> i32 {
             let payload = delivered[0].disk_path.clone();
             // The outer password (if any) is the likeliest one for the inner archive.
             let inner_guesses = password_guesses(&password, &guesses);
-            let inner = expand_inner(&lib, &staging, &payload, effective_cp, compound_tar, cp_explicit, args.inner_budget, inner_guesses);
+            let inner =
+                expand_inner(&lib, &staging, &payload, effective_cp, compound_tar, cp_explicit, args.inner_budget, inner_guesses, 0);
             match inner.kind {
                 InnerKind::Success => {
                     delivered = inner.items;
@@ -919,7 +972,7 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         }
         let payload = item.disk_path.clone();
         let inner_guesses = password_guesses(&password, &guesses);
-        let inner = expand_inner(&lib, &staging, &payload, effective_cp, false, cp_explicit, args.inner_budget, inner_guesses);
+        let inner = expand_inner(&lib, &staging, &payload, effective_cp, false, cp_explicit, args.inner_budget, inner_guesses, layers + 1);
         match inner.kind {
             InnerKind::Success if !inner.items.is_empty() => {
                 // Move the archive just unpacked (and the ones kept before it) next to the

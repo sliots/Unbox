@@ -46,6 +46,22 @@ fn open_command(exe: &Path) -> String {
     format!("\"{}\" \"%1\"", exe.display())
 }
 
+/// Right-click verbs, added to every catalog extension whichever app opens it.
+const MENU_VERBS: [(&str, &str, bool); 2] =
+    [("Unbox.Extract", "用 Unbox 解压", false), ("Unbox.ExtractHere", "用 Unbox 解压到当前文件夹", true)];
+
+fn verb_command(exe: &Path, here: bool) -> String {
+    if here {
+        format!("\"{}\" --here \"%1\"", exe.display())
+    } else {
+        open_command(exe)
+    }
+}
+
+fn menu_key(suffix: &str, verb: &str) -> String {
+    format!(r"SystemFileAssociations\{suffix}\shell\{verb}")
+}
+
 fn prog_id(format: &ArchiveFormat) -> String {
     format!("{APP_ID}{}", format.suffix)
 }
@@ -86,6 +102,16 @@ pub fn register(exe: &Path) -> std::io::Result<usize> {
         let (open_with, _) = classes.create_subkey(format!(r"{}\OpenWithProgids", format.suffix))?;
         open_with.set_raw_value(&id, &RegValue { vtype: REG_NONE, bytes: Vec::new().into() })?;
         assoc.set_value(&format.suffix, &id)?;
+
+        for (verb, label, here) in MENU_VERBS {
+            let (key, _) = classes.create_subkey(menu_key(&format.suffix, verb))?;
+            key.set_value("MUIVerb", &label)?;
+            key.set_value("Icon", &format!("\"{exe_text}\",0"))?;
+            // Any number of selected archives: each is queued in one window.
+            key.set_value("MultiSelectModel", &"Player")?;
+            let (cmd, _) = key.create_subkey("command")?;
+            cmd.set_value("", &verb_command(exe, here))?;
+        }
         count += 1;
     }
     notify_shell();
@@ -94,7 +120,8 @@ pub fn register(exe: &Path) -> std::io::Result<usize> {
 
 fn command_is_ours(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    ["\\unbox.exe\" \"%1\"", "\\unzipproxy.exe\" \"%1\""].iter().any(|s| lower.ends_with(s)) && lower.starts_with('"')
+    ["\\unbox.exe\" \"%1\"", "\\unbox.exe\" --here \"%1\"", "\\unzipproxy.exe\" \"%1\""].iter().any(|s| lower.ends_with(s))
+        && lower.starts_with('"')
 }
 
 pub fn unregister() -> Vec<String> {
@@ -140,6 +167,18 @@ pub fn unregister() -> Vec<String> {
             if owned_mapping {
                 let _ = assoc.as_ref().unwrap().delete_value(ext);
             }
+            for (verb, _, _) in MENU_VERBS {
+                let key = menu_key(ext, verb);
+                let ours = classes
+                    .open_subkey(format!(r"{key}\command"))
+                    .and_then(|k| k.get_value::<String, _>(""))
+                    .is_ok_and(|c| command_is_ours(&c));
+                if ours {
+                    if let Err(e) = classes.delete_subkey_all(&key) {
+                        failures.push(format!("{key} - {e}"));
+                    }
+                }
+            }
         }
         if let Some(registered) = &registered {
             if registered.get_value::<String, _>(id).ok().as_deref() == Some(cap_path.as_str()) {
@@ -181,9 +220,14 @@ pub fn status(exe: &Path) -> String {
                 .and_then(|k| k.get_value::<String, _>(""))
                 .is_ok_and(|c| c == command)
             && hkcu.open_subkey(format!(r"Software\Classes\{}\OpenWithProgids", format.suffix)).is_ok_and(|k| k.get_raw_value(&id).is_ok())
+            && MENU_VERBS.iter().all(|(verb, _, here)| {
+                hkcu.open_subkey(format!(r"Software\Classes\{}\command", menu_key(&format.suffix, verb)))
+                    .and_then(|k| k.get_value::<String, _>(""))
+                    .is_ok_and(|c| c == verb_command(exe, *here))
+            })
     });
     if ok && registered.as_deref() == Some(CAPABILITIES) {
-        format!("完整登记（{total} 项）")
+        format!("完整登记（{total} 项，含右键菜单）")
     } else {
         "部分登记或指向旧目录，请运行 unbox register 修复".into()
     }
@@ -201,12 +245,15 @@ pub fn open_default_apps_settings() {
 const HELP: &str = "Unbox — 双击即解压
 
 用法:
-  unbox [压缩包]           打开进度窗口并解压（无参数时弹出文件选择框）
+  unbox [--here] [--to <文件夹>] [压缩包]
+                           打开进度窗口并解压（无参数时弹出文件选择框）；
+                           --here 直接解压到当前文件夹，--to 解压到指定文件夹；
+                           同时打开多个压缩包时在同一个窗口里依次解压
   unbox register [--no-settings]
                            为当前用户登记文件关联，并打开“默认应用”设置
   unbox unregister         移除当前用户的 Unbox 文件关联
   unbox status             查看关联状态
-  unbox extract <压缩包> [--password <密码>] [--skip-invalid] [--cp <代码页>] [--recycle]
+  unbox extract <压缩包> [--password <密码>] [--skip-invalid] [--cp <代码页>] [--recycle] [--here] [--to <文件夹>]
                            无窗口解压，成功时输出目标目录（退出码 0 成功 / 2 部分完成 / 1 失败）
   unbox --version          显示版本";
 
@@ -215,7 +262,7 @@ pub fn cli(command: &str, args: &[OsString]) -> i32 {
     match command {
         "register" => match register(&exe) {
             Ok(count) => {
-                println!("[OK] 已为当前用户登记 {count} 个文件关联 → {}", exe.display());
+                println!("[OK] 已为当前用户登记 {count} 个文件关联和右键菜单 → {}", exe.display());
                 if !args.iter().any(|a| a == "--no-settings") {
                     println!("请在“默认应用”中把需要双击解压的扩展名设为由 Unbox 打开。");
                     open_default_apps_settings();

@@ -5,14 +5,17 @@ mod complete;
 mod effects;
 mod headless;
 mod plan;
+mod queue;
 mod recycle;
 
 pub use headless::extract_cli;
 
 use effects::{Taskbar, TaskbarState};
 use plan::ExtractionPlan;
+use queue::Job;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -111,6 +114,8 @@ enum Msg {
     Finalized(u64, FinalOutcome),
     SoundDone(bool),
     Stopped,
+    /// Another Unbox handed over an archive.
+    Queued(Job, Arc<queue::Offer>),
 }
 
 enum RetryPrep {
@@ -119,8 +124,8 @@ enum RetryPrep {
 }
 
 enum FinalOutcome {
-    Failed { detail: String, keep_staging: bool },
-    Delivered { final_dir: String, notes: String, partial: bool, recycle: Option<recycle::RecycleResult> },
+    Failed { detail: String, keep_staging: bool, relocatable: bool },
+    Delivered { final_dir: String, notes: String, partial: bool, recycle: Option<recycle::RecycleResult>, spread: Vec<String> },
 }
 
 thread_local! {
@@ -153,7 +158,7 @@ struct Attempt {
 
 enum PromptCtx {
     None,
-    Password,
+    Password { inner: bool },
     InvalidNames,
     Encoding(Vec<u32>),
     RecycleNotice,
@@ -162,7 +167,15 @@ enum PromptCtx {
 
 struct Controller {
     ui: slint::Weak<AppWindow>,
-    archive: PathBuf,
+    job: Job,
+    /// Archives handed over by later Unbox processes, extracted after this one.
+    queue: VecDeque<Job>,
+    /// New archives are still taken on (false once the window is on its way out).
+    accepting: bool,
+    /// Tasks finished before the current one, for the "2 / 5" counter.
+    done: u32,
+    /// Increments per task; delayed actions check it to stay with their task.
+    task: u64,
     plan: Option<ExtractionPlan>,
     worker: Option<WorkerHandle>,
     _job: Option<crate::win::job::Job>,
@@ -190,7 +203,11 @@ struct Controller {
     completed_bytes: u64,
     total_items: u32,
     size_known: bool,
-    phase: Option<Phase>,
+    phase: Option<(Phase, u32)>,
+    /// Split volume being read and the volume count (0 when not split).
+    volume: (u32, u32),
+    /// "Extract here": what landed in the destination folder.
+    spread: Vec<String>,
     started: Instant,
     meter: SpeedMeter,
     graph: SpeedGraph,
@@ -270,19 +287,44 @@ impl Controller {
 
     // ----- lifecycle -----
 
+    /// "（2/5）" while several archives are queued, else empty.
+    fn queue_prefix(&self) -> String {
+        let total = self.done + 1 + self.queue.len() as u32;
+        if total > 1 {
+            format!("{}/{total} · ", self.done + 1)
+        } else {
+            String::new()
+        }
+    }
+
+    fn show_path_info(&self, items: u32) {
+        if let Some(plan) = &self.plan {
+            let target = if plan.here {
+                Path::new(&plan.parent).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| plan.parent.clone())
+            } else {
+                plan.target_name.clone()
+            };
+            let prefix = self.queue_prefix();
+            self.ui().set_path_info(format!("{prefix}正在将 {items} 个项目从 {} 解压到 {target}", plan.source_name()).into());
+        }
+    }
+
+    fn plan_for(&self) -> ExtractionPlan {
+        ExtractionPlan::create(&self.job.archive, self.job.to.as_deref(), self.job.here)
+    }
+
     fn start(&mut self) {
-        if !self.archive.is_file() {
-            let path = self.archive.display().to_string();
+        if !self.job.archive.is_file() {
+            let path = self.job.archive.display().to_string();
             self.trigger_error("文件不存在", &path);
             return;
         }
-        self.archive = plan::first_volume(&self.archive);
-        let plan = ExtractionPlan::new(&self.archive);
+        self.job.archive = plan::first_volume(&self.job.archive);
+        let plan = self.plan_for();
         self.source_identity = Some(crate::win::capture_identity(&plan.source));
-        let ui = self.ui();
-        ui.set_path_info(format!("正在将 1 个项目从 {} 解压到 {}", plan.source_name(), plan.target_name).into());
-        self.set_status("正在打开压缩包…");
         self.plan = Some(plan);
+        self.show_path_info(1);
+        self.set_status("正在打开压缩包…");
         self.started = Instant::now();
         self.meter.reset(0.0, 0);
         self.spawn_worker();
@@ -362,19 +404,30 @@ impl Controller {
                     let _ = slint::quit_event_loop();
                 }
             }
-            Msg::Stopped => {
-                let _ = slint::quit_event_loop();
-            }
+            Msg::Stopped => self.task_done(),
+            Msg::Queued(job, offer) => offer.answer(|| {
+                if !self.accepting {
+                    return false;
+                }
+                self.queue.push_back(job);
+                // Refresh the "2/5" counter of the running task.
+                if !self.finished_handled && !self.error_shown && !self.completed {
+                    self.show_path_info(self.total_items);
+                }
+                true
+            }),
         }
     }
 
     fn on_event(&mut self, event: WorkerEvent) {
         match event {
-            WorkerEvent::Progress { phase, current_file, completed_bytes, total_bytes, size_known } => {
-                if self.phase != Some(phase) {
-                    self.phase = Some(phase);
+            WorkerEvent::Progress { phase, current_file, completed_bytes, total_bytes, size_known, layer, volume, volumes } => {
+                // Each layer restarts its byte count.
+                if self.phase != Some((phase, layer)) {
+                    self.phase = Some((phase, layer));
                     self.meter.reset(self.now(), 0);
                 }
+                self.volume = (volume, volumes);
                 self.completed_bytes = completed_bytes;
                 self.total_bytes = total_bytes;
                 self.size_known = size_known;
@@ -384,19 +437,26 @@ impl Controller {
                 self.total_items = total_items;
                 self.total_bytes = total_bytes;
                 self.size_known = size_known;
-                if let Some(plan) = &self.plan {
-                    self.ui()
-                        .set_path_info(format!("正在将 {total_items} 个项目从 {} 解压到 {}", plan.source_name(), plan.target_name).into());
-                }
+                self.show_path_info(total_items);
                 self.update_progress(None);
             }
             WorkerEvent::InvalidCharsFound { items } => self.ask_invalid_names(items),
             WorkerEvent::EncodingOptions { options } => self.ask_encoding(options),
-            WorkerEvent::PasswordRequest { retry } => {
-                self.prompt = PromptCtx::Password;
-                self.show_prompt(PromptKind::Password, "输入密码", "确定");
-                if retry {
-                    self.ui().set_prompt_error("密码错误，请重新输入。".into());
+            WorkerEvent::PasswordRequest { retry, failures, maybe_damaged, inner } => {
+                self.prompt = PromptCtx::Password { inner };
+                let ui = self.ui();
+                if inner {
+                    self.show_prompt(PromptKind::Password, "内层压缩包需要密码", "确定");
+                    ui.set_prompt_detail("解出的文件也是压缩包，并且受密码保护。输入密码继续解开，或保留它不解：".into());
+                    ui.set_prompt_dismiss("保留，不解这一层".into());
+                } else {
+                    self.show_prompt(PromptKind::Password, "输入密码", "确定");
+                    ui.set_prompt_detail("此压缩包受密码保护，请输入解压密码：".into());
+                }
+                if maybe_damaged {
+                    ui.set_prompt_error(format!("已错 {failures} 次：可能是密码不对，也可能是压缩包已损坏。").into());
+                } else if retry {
+                    ui.set_prompt_error("密码错误，请重新输入。".into());
                 }
             }
             WorkerEvent::PasswordProbing { tried, total } => {
@@ -406,11 +466,15 @@ impl Controller {
             WorkerEvent::Finished(report) => self.on_finished(report),
             WorkerEvent::Canceled => self.request_close(),
             WorkerEvent::Error { message, error_reason } => {
+                let relocatable = error_reason.as_deref() == Some("insufficient_disk_space");
                 let message = match error_reason {
+                    // The worker states how much space is needed and free.
+                    Some(reason) if relocatable => format!("{message}{}", describe_failure(&reason, -1, "failed")),
                     Some(reason) => describe_failure(&reason, -1, "failed"),
                     None => message,
                 };
                 self.trigger_error("解压失败", &message);
+                self.ui().set_can_relocate(relocatable);
             }
             WorkerEvent::PausedAck | WorkerEvent::ResumedAck => {}
         }
@@ -432,6 +496,11 @@ impl Controller {
         } else {
             format!("已解出 {}", format_bytes(self.completed_bytes))
         };
+        if let Some((_, layer @ 1..)) = self.phase {
+            status.push_str(&format!(" · 第 {} 层", layer + 1));
+        } else if self.volume.1 > 1 {
+            status.push_str(&format!(" · 分卷 {}/{}", self.volume.0.max(1), self.volume.1));
+        }
         if self.paused {
             status = format!("已暂停 · {status}");
         }
@@ -528,10 +597,40 @@ impl Controller {
 
     fn open_folder(&mut self) {
         if let Some(plan) = &self.plan {
-            if Path::new(&plan.final_dir).is_dir() {
+            if let [only] = self.spread.as_slice() {
+                // "Extract here" with one entry: show it selected in its folder.
+                let mut select = std::ffi::OsString::from("/select,\"");
+                select.push(only);
+                select.push("\"");
+                let _ = Command::new("explorer.exe").raw_arg(select).spawn();
+            } else if Path::new(&plan.final_dir).is_dir() {
                 let _ = Command::new("explorer.exe").arg(&plan.final_dir).spawn();
             }
         }
+        self.request_close();
+    }
+
+    /// Error details on the clipboard, to paste into a message or an issue.
+    fn copy_details(&mut self) {
+        let ui = self.ui();
+        let source = self.plan.as_ref().map(|p| p.source.clone()).unwrap_or_else(|| self.job.archive.display().to_string());
+        let text = format!("Unbox {}\n压缩包：{source}\n{}\n{}", env!("CARGO_PKG_VERSION"), ui.get_status_text(), ui.get_path_info());
+        if crate::win::copy_to_clipboard(&text) {
+            self.set_status("已复制详情");
+        }
+    }
+
+    /// Not enough space here: extract the same archive into a folder the user picks.
+    fn relocate(&mut self) {
+        let start = self.plan.as_ref().map(|p| PathBuf::from(&p.parent));
+        let mut dialog = rfd::FileDialog::new().set_title("选择解压位置");
+        if let Some(dir) = start {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(dir) = dialog.pick_folder() else { return };
+        let job = Job { to: Some(dir), ..self.job.clone() };
+        self.queue.push_front(job);
+        self.done = self.done.saturating_sub(1); // The same archive again, not a new one.
         self.request_close();
     }
 
@@ -545,6 +644,7 @@ impl Controller {
         ui.set_prompt_remember(false);
         ui.set_prompt_input(SharedString::default());
         ui.set_prompt_error(SharedString::default());
+        ui.set_prompt_dismiss("取消".into());
         ui.set_prompt(kind);
         self.reveal();
         if let Some(hwnd) = self.hwnd {
@@ -601,7 +701,7 @@ impl Controller {
         let ui = self.ui();
         match std::mem::replace(&mut self.prompt, PromptCtx::None) {
             PromptCtx::None => {}
-            PromptCtx::Password => {
+            PromptCtx::Password { .. } => {
                 let password = ui.get_prompt_input().to_string();
                 self.send(WorkerCommand::PasswordResponse { password });
                 self.set_status("正在验证密码…");
@@ -673,6 +773,12 @@ impl Controller {
                 self.finalize(report, None);
             }
             PromptCtx::None => self.hide_prompt(),
+            PromptCtx::Password { inner: true } => {
+                // Keep the inner archive as it is; the outer content is still delivered.
+                self.hide_prompt();
+                self.send(WorkerCommand::PasswordSkip);
+                self.set_status("已保留内层压缩包，正在完成…");
+            }
             _ => {
                 // Dismissing a question the worker is waiting on cancels the task.
                 self.hide_prompt();
@@ -693,11 +799,12 @@ impl Controller {
         ui.set_controls_enabled(false);
         self.set_status(title);
         ui.set_path_info(message.into());
+        ui.set_can_copy_details(true);
         self.taskbar(TaskbarState::Error, 1.0);
         self.attention();
     }
 
-    fn fail_without_commit(&mut self, detail: &str, keep_staging: bool) {
+    fn fail_without_commit(&mut self, detail: &str, keep_staging: bool, relocatable: bool) {
         let ui = self.ui();
         ui.set_state(TaskState::Failed);
         ui.set_indeterminate(false);
@@ -707,6 +814,8 @@ impl Controller {
         ui.set_path_info(detail.into());
         let name = self.plan.as_ref().map(|p| p.source_name()).unwrap_or_default();
         ui.set_title_text(format!("解压失败 - {name}").into());
+        ui.set_can_copy_details(true);
+        ui.set_can_relocate(relocatable);
         if !keep_staging {
             if let Some(plan) = &self.plan {
                 plan.cleanup_staging();
@@ -794,7 +903,7 @@ impl Controller {
             Phase::Inner => self.attempt.inner_limit = Some(limit),
             Phase::Outer => self.attempt.outer_limit = Some(limit),
         }
-        self.plan = Some(ExtractionPlan::new(&self.archive));
+        self.plan = Some(self.plan_for());
         self.finished_handled = false;
         self.error_shown = false;
         self.size_known = false;
@@ -814,7 +923,7 @@ impl Controller {
 
     fn finalize(&mut self, report: Box<FinishedReport>, budget_detail: Option<String>) {
         let Some(worker) = self.worker.clone() else {
-            self.fail_without_commit("工作进程已不可用，已保留源包。", true);
+            self.fail_without_commit("工作进程已不可用，已保留源包。", true, false);
             self.completed = true;
             return;
         };
@@ -838,11 +947,12 @@ impl Controller {
         self.completed = true;
         let ui = self.ui();
         match outcome {
-            FinalOutcome::Failed { detail, keep_staging } => self.fail_without_commit(&detail, keep_staging),
-            FinalOutcome::Delivered { final_dir, notes, partial, recycle } => {
+            FinalOutcome::Failed { detail, keep_staging, relocatable } => self.fail_without_commit(&detail, keep_staging, relocatable),
+            FinalOutcome::Delivered { final_dir, notes, partial, recycle, spread } => {
                 if let Some(plan) = self.plan.as_mut() {
                     plan.final_dir = final_dir;
                 }
+                self.spread = spread;
                 ui.set_finished(true);
                 ui.set_can_open_folder(true);
                 ui.set_indeterminate(false);
@@ -859,6 +969,7 @@ impl Controller {
                     ui.set_state(TaskState::Warning);
                     self.set_status("部分完成");
                     ui.set_path_info(format!("{notes}；源压缩包已保留。").into());
+                    ui.set_can_copy_details(true);
                     self.reveal();
                 } else if let Some(r) = recycle.as_ref().filter(|_| recycle_problem) {
                     ui.set_state(TaskState::Warning);
@@ -874,6 +985,7 @@ impl Controller {
                     let tail =
                         if failures.is_empty() { String::new() } else { format!("（回收未确认：{}）", failures.join("；")) };
                     ui.set_path_info(format!("解压已完成并已逐项校验。{}。{tail}", r.message).into());
+                    ui.set_can_copy_details(true);
                     self.reveal();
                     std::thread::spawn(|| {
                         effects::play_finished_sound();
@@ -888,6 +1000,13 @@ impl Controller {
                         text.push_str(&r.message);
                     }
                     ui.set_path_info(text.into());
+                    if !self.queue.is_empty() {
+                        // More archives are waiting: go straight on to the next one.
+                        self.task_done();
+                        return;
+                    }
+                    // Last one: take no more archives (a latecomer opens its own window).
+                    self.accepting = false;
                     if self.shown {
                         // Done: the window goes away at once; the chime plays out after it.
                         let _ = ui.hide();
@@ -903,11 +1022,89 @@ impl Controller {
             }
         }
         if self.close_requested {
-            let _ = slint::quit_event_loop();
+            self.task_done();
         }
     }
 
     // ----- closing -----
+
+    /// The current task is over (delivered, failed and closed, or canceled): go on with
+    /// the next queued archive, or leave.
+    fn task_done(&mut self) {
+        self.done += 1;
+        match self.queue.pop_front() {
+            Some(job) => self.begin(job),
+            None => {
+                self.accepting = false;
+                let _ = slint::quit_event_loop();
+            }
+        }
+    }
+
+    /// Close button in the title bar (or Alt+F4): stop this task and drop the queue.
+    fn quit_all(&mut self) {
+        self.queue.clear();
+        self.request_close();
+    }
+
+    /// Reset the window and the per-task state, then start `job`.
+    fn begin(&mut self, job: Job) {
+        if let Some(worker) = self.worker.take() {
+            worker.close_stdin();
+        }
+        self._job = None;
+        self.job = job;
+        self.task += 1;
+        self.plan = None;
+        self.manifest_path.clear();
+        self.attempt = Attempt::default();
+        self.source_identity = None;
+        self.paused = false;
+        self.completed = false;
+        self.finished_handled = false;
+        self.error_shown = false;
+        self.closing = false;
+        self.close_requested = false;
+        self.total_bytes = 0;
+        self.completed_bytes = 0;
+        self.total_items = 1;
+        self.size_known = false;
+        self.phase = None;
+        self.volume = (0, 0);
+        self.spread.clear();
+        self.meter = SpeedMeter::default();
+        self.graph = SpeedGraph::default();
+        self.prompt = PromptCtx::None;
+        self.wants_attention = false;
+        let ui = self.ui();
+        ui.set_prompt(PromptKind::None);
+        ui.set_state(TaskState::Running);
+        ui.set_finished(false);
+        ui.set_can_open_folder(false);
+        ui.set_can_copy_details(false);
+        ui.set_can_relocate(false);
+        ui.set_controls_enabled(true);
+        ui.set_indeterminate(true);
+        ui.set_progress(0.0);
+        ui.set_graph_area(SharedString::default());
+        ui.set_graph_progress(0.0);
+        ui.set_graph_label(SharedString::default());
+        ui.set_detail_name("准备中...".into());
+        ui.set_detail_eta("正在计算...".into());
+        ui.set_detail_remaining("正在计算...".into());
+        self.taskbar(TaskbarState::Indeterminate, 0.0);
+        self.start();
+        if !self.shown {
+            let task = self.task;
+            slint::Timer::single_shot(SHOW_DELAY, move || {
+                with_controller(|c| {
+                    if c.task == task && !c.completed {
+                        c.reveal();
+                    }
+                })
+            });
+        }
+    }
 
     fn request_close(&mut self) {
         if self.finished_handled && !self.completed {
@@ -920,6 +1117,7 @@ impl Controller {
                     return;
                 }
                 self.closing = true;
+                self.ui().set_controls_enabled(false);
                 worker.send(&WorkerCommand::Cancel);
                 let plan = self.plan.clone();
                 let manifest = self.manifest_path.clone();
@@ -935,7 +1133,7 @@ impl Controller {
             }
             remove_manifest(&self.manifest_path);
         }
-        let _ = slint::quit_event_loop();
+        self.task_done();
     }
 }
 
@@ -1081,11 +1279,14 @@ fn finalize(request: FinalizeRequest) -> FinalOutcome {
             Some(detail) => format!("{detail} 源压缩包已保留。"),
             None => describe_failure(&report.error_reason, code, status_text),
         };
-        return FinalOutcome::Failed { detail, keep_staging: exit.is_none() };
+        let relocatable = report.error_reason == "insufficient_disk_space";
+        return FinalOutcome::Failed { detail, keep_staging: exit.is_none(), relocatable };
     }
     if !unbox_core::eq_ignore_case(&report.manifest, &manifest_path) {
         return FinalOutcome::Failed {
-            detail: "工作进程返回的交付清单路径与本次任务不符，已保留源包。".into(), keep_staging: true
+            detail: "工作进程返回的交付清单路径与本次任务不符，已保留源包。".into(),
+            keep_staging: true,
+            relocatable: false,
         };
     }
 
@@ -1096,11 +1297,14 @@ fn finalize(request: FinalizeRequest) -> FinalOutcome {
             return FinalOutcome::Failed {
                 detail: "完成处理异常，已保留源包和可用的暂存内容：交付清单与完成消息的交付根不一致".into(),
                 keep_staging: true,
+                relocatable: false,
             }
         }
         Err(e) => {
             return FinalOutcome::Failed {
-                detail: format!("完成处理异常，已保留源包和可用的暂存内容：{e}"), keep_staging: true
+                detail: format!("完成处理异常，已保留源包和可用的暂存内容：{e}"),
+                keep_staging: true,
+                relocatable: false,
             }
         }
     };
@@ -1116,7 +1320,7 @@ fn finalize(request: FinalizeRequest) -> FinalOutcome {
         if !result.kept_staging.is_empty() {
             detail.push_str(&format!("\n暂存目录已保留以便恢复：{}", result.kept_staging));
         }
-        return FinalOutcome::Failed { keep_staging: !result.kept_staging.is_empty(), detail };
+        return FinalOutcome::Failed { keep_staging: !result.kept_staging.is_empty(), detail, relocatable: false };
     }
 
     let mut notes = result.summary;
@@ -1138,7 +1342,7 @@ fn finalize(request: FinalizeRequest) -> FinalOutcome {
     if result.zone_marked > 0 {
         notes.push_str(&format!("；已为 {} 个文件保留下载来源标记", result.zone_marked));
     }
-    FinalOutcome::Delivered { final_dir: result.final_dir, notes, partial, recycle: result.recycle }
+    FinalOutcome::Delivered { final_dir: result.final_dir, notes, partial, recycle: result.recycle, spread: result.spread }
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,14 +1362,45 @@ fn pick_archive() -> Option<PathBuf> {
     dialog.add_filter("所有文件", &["*"]).pick_file()
 }
 
-pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
-    let archive = match archive.map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()) {
-        Some(path) => path,
-        None => match pick_archive() {
-            Some(path) => path,
-            None => return 0,
-        },
-    };
+/// `unbox [--here] [--to <folder>] [archive]`.
+fn parse_job(args: &[std::ffi::OsString]) -> Option<Job> {
+    let mut job = Job { archive: PathBuf::new(), here: false, to: None };
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.to_str() {
+            Some("--here") => job.here = true,
+            Some("--to") => job.to = iter.next().map(PathBuf::from),
+            _ if job.archive.as_os_str().is_empty() => job.archive = PathBuf::from(arg),
+            _ => {}
+        }
+    }
+    if job.archive.as_os_str().is_empty() {
+        job.archive = pick_archive()?;
+    }
+    Some(job)
+}
+
+pub fn run(args: &[std::ffi::OsString]) -> i32 {
+    let Some(job) = parse_job(args) else { return 0 };
+    // Another Unbox is already at work: queue the archive in its window.
+    let mut owner = false;
+    for _ in 0..3 {
+        match queue::hand_off(&job) {
+            queue::HandOff::Accepted => return 0,
+            queue::HandOff::Declined => break,
+            queue::HandOff::NoOwner => {
+                if queue::serve(|job, offer| post(Msg::Queued(job, offer))) {
+                    owner = true;
+                    break;
+                }
+                // Another Unbox became the owner a moment ago: hand over to it.
+            }
+        }
+    }
+    run_window(job, owner)
+}
+
+fn run_window(job: Job, accepting: bool) -> i32 {
     // The UI thread is a single-threaded apartment (taskbar progress, Shell dialogs).
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
@@ -1202,7 +1437,11 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
 
     let controller = Rc::new(RefCell::new(Controller {
         ui: ui.as_weak(),
-        archive,
+        job,
+        queue: VecDeque::new(),
+        accepting,
+        done: 0,
+        task: 0,
         plan: None,
         worker: None,
         _job: None,
@@ -1225,6 +1464,8 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
         total_items: 1,
         size_known: false,
         phase: None,
+        volume: (0, 0),
+        spread: Vec::new(),
         started: Instant::now(),
         meter: SpeedMeter::default(),
         graph: SpeedGraph::default(),
@@ -1238,6 +1479,9 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
     ui.on_pause_clicked(|| with_controller(|c| c.pause_resume()));
     ui.on_cancel_clicked(|| with_controller(|c| c.request_close()));
     ui.on_close_clicked(|| with_controller(|c| c.request_close()));
+    ui.on_quit_clicked(|| with_controller(|c| c.quit_all()));
+    ui.on_copy_details(|| with_controller(|c| c.copy_details()));
+    ui.on_relocate(|| with_controller(|c| c.relocate()));
     ui.on_minimize_clicked(|| {
         with_controller(|c| {
             if let Some(hwnd) = c.hwnd {
@@ -1251,7 +1495,7 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
     ui.on_prompt_accepted(|| with_controller(|c| c.prompt_accepted()));
     ui.on_prompt_dismissed(|| with_controller(|c| c.prompt_dismissed()));
     ui.window().on_close_requested(|| {
-        with_controller(|c| c.request_close());
+        with_controller(|c| c.quit_all());
         slint::CloseRequestResponse::KeepWindowShown
     });
 
@@ -1278,7 +1522,7 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
     slint::Timer::single_shot(Duration::from_millis(0), || with_controller(|c| c.start()));
     slint::Timer::single_shot(SHOW_DELAY, || {
         with_controller(|c| {
-            if !c.completed {
+            if c.task == 0 && !c.completed {
                 c.reveal();
             }
         })

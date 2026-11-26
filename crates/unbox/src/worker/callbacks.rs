@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use unbox_core::budget::OutputBudget;
@@ -112,6 +112,8 @@ impl MultiVolumeStream {
             parts.push((file, total));
             total = total.checked_add(len)?;
         }
+        VOLUMES.store(parts.len() as u32, Ordering::Relaxed);
+        VOLUME.store(1, Ordering::Relaxed);
         Some((MultiVolumeStream { parts, total, position: Mutex::new(0) }.into(), total))
     }
 }
@@ -126,6 +128,7 @@ impl ISequentialInStream_Impl for MultiVolumeStream_Impl {
             return S_OK;
         }
         let index = self.parts.partition_point(|(_, start)| *start <= *position) - 1;
+        VOLUME.store(index as u32 + 1, Ordering::Relaxed);
         let (file, start) = &self.parts[index];
         let end = self.parts.get(index + 1).map_or(self.total, |(_, next)| *next);
         let want = (size as u64).min(end - *position) as usize;
@@ -237,15 +240,25 @@ impl ISequentialOutStream_Impl for OutFileStream_Impl {
 // Progress throttle
 // ---------------------------------------------------------------------------
 
+/// The split volume a `MultiVolumeStream` last read (1-based) and the volume count.
+static VOLUME: AtomicU32 = AtomicU32::new(0);
+static VOLUMES: AtomicU32 = AtomicU32::new(0);
+
 pub struct Progress {
     phase: Phase,
     size_known: bool,
+    layer: u32,
     last: Mutex<Option<Instant>>,
 }
 
 impl Progress {
     pub fn new(phase: Phase, size_known: bool) -> Self {
-        Self { phase, size_known, last: Mutex::new(None) }
+        Self { phase, size_known, layer: 0, last: Mutex::new(None) }
+    }
+
+    pub fn at_layer(mut self, layer: u32) -> Self {
+        self.layer = layer;
+        self
     }
 
     fn report(&self, file: &str, completed: u64, total: u64) {
@@ -260,6 +273,9 @@ impl Progress {
                 completed_bytes: completed,
                 total_bytes: total,
                 size_known: self.size_known,
+                layer: self.layer,
+                volume: if self.phase == Phase::Outer { VOLUME.load(Ordering::Relaxed) } else { 0 },
+                volumes: if self.phase == Phase::Outer { VOLUMES.load(Ordering::Relaxed) } else { 0 },
             });
         }
     }
@@ -802,7 +818,11 @@ impl ICryptoGetTextPassword2_Impl for ProbeCallback_Impl {
 
 pub enum Probe {
     Correct,
-    Wrong,
+    /// Not decoded; `definite` when the format itself said "wrong password" (ZIP AES
+    /// and RAR5 carry a check value) rather than reporting bad data.
+    Wrong {
+        definite: bool,
+    },
     /// The engine cannot decode this item at all (unsupported method): no verdict.
     Unknown,
 }
@@ -820,6 +840,7 @@ pub fn probe_password(archive: &IInArchive, index: u32, password: Vec<u16>) -> P
     match state.result {
         Some(op_result::OK) if hr == S_OK => Probe::Correct,
         Some(op_result::UNSUPPORTED_METHOD) => Probe::Unknown,
-        _ => Probe::Wrong,
+        Some(op_result::WRONG_PASSWORD) => Probe::Wrong { definite: true },
+        _ => Probe::Wrong { definite: false },
     }
 }

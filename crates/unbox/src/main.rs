@@ -1,7 +1,8 @@
 //! Unbox — double-click to extract.
 //!
 //! One executable plays three roles:
-//! * `unbox [archive]` — the progress window (UI process);
+//! * `unbox [--here] [archive]` — the progress window (UI process); later ones hand
+//!   their archive to the first window, which extracts them one after another;
 //! * `unbox --worker …` — the isolated extraction worker driven over stdin/stdout,
 //!   which hosts 7z.dll so a crash in a decoder can never take the UI down;
 //! * `unbox extract <archive>` — the same pipeline without a window;
@@ -32,7 +33,7 @@ fn main() {
             win::attach_parent_console();
             assoc::cli(first, &args[1..])
         }
-        _ => app::run(args.first().cloned()),
+        _ => app::run(&args),
     };
     std::process::exit(code);
 }

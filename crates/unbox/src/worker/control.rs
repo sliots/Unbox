@@ -12,6 +12,7 @@ struct State {
     canceled: bool,
     password_pending: bool,
     password: Option<String>,
+    password_skipped: bool,
     invalid_action: Option<InvalidCharsAction>,
     encoding: Option<u32>,
 }
@@ -84,6 +85,13 @@ impl Control {
                 }
                 wipe(&mut password);
             }
+            WorkerCommand::PasswordSkip => {
+                let mut state = self.state.lock().unwrap();
+                if state.password_pending {
+                    state.password_skipped = true;
+                    self.changed.notify_all();
+                }
+            }
             WorkerCommand::InvalidCharsResponse { action } => {
                 self.state.lock().unwrap().invalid_action = Some(action);
                 self.changed.notify_all();
@@ -121,28 +129,29 @@ impl Control {
         });
     }
 
-    /// Ask the UI for a password (`retry` after a wrong one). `None` when canceled.
-    pub fn request_password(&self, retry: bool) -> Option<String> {
+    /// Ask the UI for a password.
+    pub fn request_password(&self, request: WorkerEvent) -> Answer {
         let mut state = self.state.lock().unwrap();
         if state.canceled {
-            return None;
+            return Answer::Canceled;
         }
         state.password_pending = true;
         state.password = None;
+        state.password_skipped = false;
         drop(state);
-        self.send(&WorkerEvent::PasswordRequest { retry });
+        self.send(&request);
         let mut state = self.state.lock().unwrap();
-        while state.password.is_none() && !state.canceled {
+        while state.password.is_none() && !state.password_skipped && !state.canceled {
             state = self.changed.wait(state).unwrap();
         }
         state.password_pending = false;
-        if state.canceled {
+        if state.canceled || state.password_skipped {
             if let Some(mut p) = state.password.take() {
                 wipe(&mut p);
             }
-            return None;
+            return if state.canceled { Answer::Canceled } else { Answer::Skip };
         }
-        state.password.take()
+        state.password.take().map_or(Answer::Canceled, Answer::Password)
     }
 
     fn wait_answer<T>(&self, event: WorkerEvent, take: impl Fn(&mut State) -> Option<T>, reset: impl Fn(&mut State)) -> Result<T, bool> {
@@ -175,6 +184,13 @@ impl Control {
     }
 }
 
+pub enum Answer {
+    Password(String),
+    /// Leave this (inner) archive as it is.
+    Skip,
+    Canceled,
+}
+
 /// Wait for the `start` line written by the UI before touching anything.
 pub fn wait_for_start() -> bool {
     let mut line = String::new();
@@ -201,6 +217,12 @@ struct PasswordState {
     guesses: std::collections::VecDeque<String>,
     guess_total: u32,
     guess_tried: u32,
+    /// Wrong answers from the user, and whether any of them was a definite verdict.
+    user_failures: u32,
+    definite_failure: bool,
+    /// Found inside the extracted content: the user may leave it as it is.
+    inner: bool,
+    skipped: bool,
 }
 
 fn wipe_wide(text: &mut [u16]) {
@@ -211,6 +233,23 @@ impl ArchivePassword {
     pub fn with_guesses(guesses: Vec<String>) -> Self {
         let state = PasswordState { guess_total: guesses.len() as u32, guesses: guesses.into(), ..Default::default() };
         ArchivePassword { inner: Mutex::new(state) }
+    }
+
+    /// An archive found inside the extracted content.
+    pub fn for_inner_archive(self) -> Self {
+        self.inner.lock().unwrap().inner = true;
+        self
+    }
+
+    /// The user chose to leave this archive as it is.
+    pub fn skipped(&self) -> bool {
+        self.inner.lock().unwrap().skipped
+    }
+
+    /// The candidate in use was typed by the user (guesses are probed more cheaply).
+    pub fn current_from_user(&self) -> bool {
+        let state = self.inner.lock().unwrap();
+        state.current.is_some() && state.current_from_user
     }
 
     pub fn requested(&self) -> bool {
@@ -257,10 +296,23 @@ impl ArchivePassword {
                 state.current_from_user = false;
                 wipe(&mut guess);
             } else {
-                let retry = state.user_rejected;
+                let request = WorkerEvent::PasswordRequest {
+                    retry: state.user_rejected,
+                    failures: state.user_failures,
+                    maybe_damaged: state.user_failures >= 3 && !state.definite_failure,
+                    inner: state.inner,
+                };
                 drop(state);
-                let mut text = control().request_password(retry)?;
+                let answer = control().request_password(request);
                 state = self.inner.lock().unwrap();
+                let mut text = match answer {
+                    Answer::Password(text) => text,
+                    Answer::Skip => {
+                        state.skipped = true;
+                        return None;
+                    }
+                    Answer::Canceled => return None,
+                };
                 state.current = Some(text.encode_utf16().collect());
                 state.current_from_user = true;
                 wipe(&mut text);
@@ -270,13 +322,16 @@ impl ArchivePassword {
     }
 
     /// The candidate in use is wrong: the next `get` moves on to the next guess or asks
-    /// the user again (telling them the previous answer was wrong).
-    pub fn reject(&self) {
+    /// the user again (telling them the previous answer was wrong). `definite` when the
+    /// format said "wrong password" rather than reporting undecodable data.
+    pub fn reject(&self, definite: bool) {
         let mut state = self.inner.lock().unwrap();
         if let Some(mut p) = state.current.take() {
             wipe_wide(&mut p);
             if state.current_from_user {
                 state.user_rejected = true;
+                state.user_failures += 1;
+                state.definite_failure |= definite;
             }
         }
     }
