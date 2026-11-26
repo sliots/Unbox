@@ -1,7 +1,9 @@
 name: Release
 
-# Push a tag such as v2.0.0 (matching the workspace version in Cargo.toml) to build,
-# test and publish the portable zip, then refresh the Scoop manifest in bucket/.
+# Push a tag such as v2.0.0 (matching the workspace version in Cargo.toml). The release
+# reuses the package that CI already built and smoke-tested for that exact commit, so a
+# commit pushed together with its tag is built only once. If no CI package exists (for
+# example a docs-only commit), the package is built here instead.
 on:
   push:
     tags: ["v*"]
@@ -13,54 +15,136 @@ on:
 
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
-  CARGO_TERM_COLOR: always
   # Branch that hosts the Rust edition and the Scoop bucket manifest.
   MANIFEST_BRANCH: rust
 
 jobs:
-  release:
-    runs-on: windows-latest
+  prepare:
+    name: Find the CI package
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
-      version: ${{ steps.package.outputs.version }}
-      sha256: ${{ steps.package.outputs.sha256 }}
-      name: ${{ steps.package.outputs.name }}
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      name: ${{ steps.meta.outputs.name }}
+      run_id: ${{ steps.ci.outputs.run_id }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Package
-        id: package
-        shell: pwsh
-        run: ./scripts/package.ps1 -Version "${{ github.event.inputs.tag || github.ref_name }}"
-      - name: Smoke test
-        shell: pwsh
-        run: ./scripts/smoke-test.ps1 -PackageDir "${{ steps.package.outputs.dir }}"
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Check tag against Cargo.toml
+        id: meta
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          cargo_version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::Tag $TAG does not match Cargo.toml version $cargo_version"
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "name=Unbox-v$version-win-x64"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Wait for CI on this commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          NAME: ${{ steps.meta.outputs.name }}
+        run: |
+          run=""
+          # A commit pushed together with its tag may take a few seconds to get its CI run.
+          for _ in $(seq 1 12); do
+            run=$(gh run list -R "$REPO" --workflow ci.yml --commit "$SHA" --event push \
+              --json databaseId --jq '.[0].databaseId // empty')
+            [ -n "$run" ] && break
+            sleep 10
+          done
+          if [ -z "$run" ]; then
+            echo "No CI run for $SHA; the package will be built by this workflow."
+            echo "run_id=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Waiting for CI run $run"
+          gh run watch "$run" -R "$REPO" --interval 20 > /dev/null || true
+          conclusion=$(gh run view "$run" -R "$REPO" --json conclusion --jq .conclusion)
+          if [ "$conclusion" != "success" ]; then
+            echo "::error::CI run $run for $SHA finished with '$conclusion'; not releasing."
+            exit 1
+          fi
+          artifact=$(gh api "repos/$REPO/actions/runs/$run/artifacts" \
+            --jq ".artifacts[] | select(.name == \"$NAME\" and (.expired | not)) | .id")
+          if [ -z "$artifact" ]; then
+            echo "CI run $run has no '$NAME' artifact; the package will be built by this workflow."
+            run=""
+          fi
+          echo "run_id=$run" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.run_id == ''
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+
+  publish:
+    name: Publish release and Scoop manifest
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      NAME: ${{ needs.prepare.outputs.name }}
+    steps:
+      - name: Download package from CI
+        if: needs.prepare.outputs.run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ needs.prepare.outputs.run_id }}" -R "${{ github.repository }}" -n "$NAME" -D dist
+      - name: Download package from this run
+        if: needs.prepare.outputs.run_id == ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.prepare.outputs.name }}
+          path: dist
+      - name: Verify checksum
+        id: sum
+        working-directory: dist
+        run: |
+          sha256sum -c SHA256SUMS.txt
+          echo "sha256=$(cut -d' ' -f1 SHA256SUMS.txt)" >> "$GITHUB_OUTPUT"
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: Unbox ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Unbox ${{ needs.prepare.outputs.tag }}
           generate_release_notes: true
           files: |
-            dist/${{ steps.package.outputs.name }}.zip
+            dist/${{ needs.prepare.outputs.name }}.zip
             dist/SHA256SUMS.txt
 
-  scoop:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.MANIFEST_BRANCH }}
+          path: repo
       - name: Update bucket/unbox.json
+        working-directory: repo
         env:
-          VERSION: ${{ needs.release.outputs.version }}
-          SHA256: ${{ needs.release.outputs.sha256 }}
-          NAME: ${{ needs.release.outputs.name }}
+          SHA256: ${{ steps.sum.outputs.sha256 }}
           REPO: ${{ github.repository }}
         run: |
           python3 - <<'PY'
@@ -82,9 +166,10 @@ jobs:
               f.write("\n")
           PY
       - name: Commit manifest
+        working-directory: repo
         run: |
           if git diff --quiet; then echo "Manifest already up to date"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "scoop: unbox ${{ needs.release.outputs.version }}"
-          git push origin HEAD:${{ env.MANIFEST_BRANCH }}
+          git commit -am "scoop: unbox $VERSION"
+          git push origin "HEAD:$MANIFEST_BRANCH"

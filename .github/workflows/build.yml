@@ -1,0 +1,56 @@
+name: Build
+
+# Windows build + end-to-end smoke test, shared by CI (every push / PR) and by Release
+# (only when no CI artifact exists for the tagged commit).
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build (defaults to the triggering ref)"
+        type: string
+        default: ""
+      save-cache:
+        description: "Save the Rust build cache after the build"
+        type: boolean
+        default: false
+    outputs:
+      artifact:
+        description: "Name of the uploaded package artifact"
+        value: ${{ jobs.windows.outputs.artifact }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Build and smoke test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    outputs:
+      artifact: ${{ steps.package.outputs.name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ inputs.save-cache }}
+      - name: Clippy
+        run: cargo clippy --locked -p unbox --release -- -D warnings
+      - name: Package
+        id: package
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Smoke test
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1 -PackageDir "${{ steps.package.outputs.dir }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}
+          if-no-files-found: error
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt

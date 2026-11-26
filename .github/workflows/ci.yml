@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to a PR supersedes the older run; pushes to the branch never cancel each
+# other, because Release reuses the package built for the exact tagged commit.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,36 +23,19 @@ jobs:
   core:
     name: Core rules (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: cargo fmt --all --check
       - run: cargo test --locked -p unbox-core
 
   windows:
-    name: Build and smoke test (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --locked -p unbox --release -- -D warnings
-      - name: Package
-        id: package
-        shell: pwsh
-        run: ./scripts/package.ps1
-      - name: Smoke test
-        shell: pwsh
-        run: ./scripts/smoke-test.ps1 -PackageDir "${{ steps.package.outputs.dir }}"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ steps.package.outputs.name }}
-          path: |
-            dist/*.zip
-            dist/SHA256SUMS.txt
+    uses: ./.github/workflows/build.yml
+    with:
+      save-cache: ${{ github.event_name != 'pull_request' }}
