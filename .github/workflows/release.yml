@@ -27,7 +27,7 @@ jobs:
       sha256: ${{ steps.package.outputs.sha256 }}
       name: ${{ steps.package.outputs.name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -40,7 +40,7 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-test.ps1 -PackageDir "${{ steps.package.outputs.dir }}"
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: Unbox ${{ github.event.inputs.tag || github.ref_name }}
@@ -53,7 +53,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.MANIFEST_BRANCH }}
       - name: Update bucket/unbox.json
