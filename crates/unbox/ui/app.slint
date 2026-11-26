@@ -418,7 +418,9 @@ export component AppWindow inherits Window {
         : root.prompt == PromptKind.recycle-notice ? recycle-sheet.preferred-height
         : root.prompt == PromptKind.budget ? budget-sheet.preferred-height
         : 0px;
-    property <length> wanted-height: root.chrome + max(main.preferred-height, root.sheet-height);
+    // A prompt replaces the main view, so it alone decides the height (an expanded
+    // details view must not leave empty space below the prompt).
+    property <length> wanted-height: root.chrome + (root.prompt-open ? root.sheet-height : main.preferred-height);
     out property <length> shown-height: root.wanted-height;
     animate shown-height { duration: 220ms; easing: ease-in-out; }
 
@@ -733,7 +735,7 @@ export component AppWindow inherits Window {
                 dismissed => { root.prompt-dismissed(); }
                 VerticalLayout {
                     spacing: 8px;
-                    padding-bottom: 16px;
+                    padding-bottom: 0px;
                     Text { text: "此压缩包受密码保护，请输入解压密码："; font-size: 12px; color: Theme.text; wrap: word-wrap; }
                     InputBox {
                         active: root.prompt == PromptKind.password;
