@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/sliots/Unbox/releases">
-    <img src="https://img.shields.io/badge/Version-v2.0.0-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
+    <img src="https://img.shields.io/badge/Version-v2.0.1-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
   </a>
   <img src="https://img.shields.io/badge/Platform-Windows_11_%7C_10-0078D4?style=for-the-badge&logo=windows&labelColor=000000" alt="Platform">
   <img src="https://img.shields.io/badge/Core-Rust_%7C_Slint-B7410E?style=for-the-badge&logo=rust&labelColor=000000" alt="Core">
@@ -90,7 +90,7 @@ scoop install https://raw.githubusercontent.com/sliots/Unbox/rust/bucket/unbox.j
 
 ### 便携包
 
-从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.0-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
+从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.1-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
 
 ```powershell
 .\unbox.exe register      # 登记关联并打开“默认应用”设置
@@ -140,7 +140,7 @@ unbox extract D:\Downloads\project.7z --password secret
 cargo build --release -p unbox            # target\release\unbox.exe
 copy assets\7z.dll target\release\        # 7z.dll 需与 unbox.exe 同目录
 .\scripts\package.ps1                     # 生成 dist\Unbox-v<版本>-win-x64.zip 与 SHA256SUMS.txt
-.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.0-win-x64
+.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.1-win-x64
 ```
 
 在 macOS / Linux 上交叉编译（需要 LLVM 提供 `clang-cl`、`llvm-rc`，首次会自动下载 MSVC CRT 与 Windows SDK）：
@@ -167,7 +167,7 @@ bucket/unbox.json   Scoop 清单（发布时由 CI 自动更新版本与哈希�
 - **发布**（`.github/workflows/release.yml`）：推送与 `Cargo.toml` 版本一致的标签即可：
 
   ```bash
-  git tag v2.0.0 && git push origin v2.0.0
+  git tag v2.0.1 && git push origin v2.0.1
   ```
 
   工作流会构建、测试、创建 GitHub Release（zip + SHA256SUMS.txt），并把新版本号与哈希写回 `rust` 分支的 `bucket/unbox.json`。

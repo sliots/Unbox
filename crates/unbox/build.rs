@@ -62,7 +62,7 @@ fn main() {
             .set("LegalCopyright", "MIT License")
             .set("FileVersion", &version)
             .set("ProductVersion", &version)
-            .set_manifest(MANIFEST);
+            .set_manifest(&MANIFEST.replace("{version}", &format!("{version}.0")));
         res.compile().expect("resource compilation");
     }
 }
@@ -186,7 +186,7 @@ fn write_png_icon(png: &Path, ico: &Path) {
 
 const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="Unbox" version="2.0.0.0"/>
+  <assemblyIdentity type="win32" name="Unbox" version="{version}"/>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
