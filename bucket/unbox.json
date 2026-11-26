@@ -11,7 +11,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/sliots/Unbox/releases/download/v2.0.0/Unbox-v2.0.0-win-x64.zip",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            "hash": "e1b675e0719b9a0c4bd5bff702ab29434badc743b5f8794f67146c3a84950848"
         }
     },
     "extract_dir": "Unbox-v2.0.0-win-x64",
