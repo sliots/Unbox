@@ -10,7 +10,7 @@
 
 <p>
   <a href="https://github.com/sliots/Unbox/releases">
-    <img src="https://img.shields.io/badge/Version-v2.0.3-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
+    <img src="https://img.shields.io/badge/Version-v2.0.4-00C853?style=for-the-badge&logo=github&labelColor=000000" alt="Release">
   </a>
   <img src="https://img.shields.io/badge/Platform-Windows_11_%7C_10-0078D4?style=for-the-badge&logo=windows&labelColor=000000" alt="Platform">
   <img src="https://img.shields.io/badge/Core-Rust_%7C_Slint-B7410E?style=for-the-badge&logo=rust&labelColor=000000" alt="Core">
@@ -49,6 +49,7 @@
 
 - **与 1.x 一致的外观**：按 1.x WPF 窗口 1:1 还原——自绘 30 px 标题栏（时钟图标、标题、最小化 / 关闭）、1 px 边框、12 px 进度条、92 px 吞吐面积图与三行详细信息，浅色 / 深色配色与 1.x 相同。
 - **Skia 渲染**：文字与图形抗锯齿清晰，使用 CPU 光栅化，不依赖显卡驱动，虚拟机与远程桌面同样可用。
+- **小任务不弹窗**：与资源管理器的复制对话框一样，解压超过 1 秒才显示窗口；需要输入密码、选择编码或出错时立即显示。成功完成后窗口立即关闭。
 - **详细信息展开/折叠**：窗口高度与内容 220 ms 缓动过渡，与 1.x 相同。
 - **询问在窗口内完成**：密码、文件名编码、非法文件名、回收站提示、解压上限沿用 1.x 对话框的内容与布局，直接显示在主窗口内，窗口高度随内容调整。
 - **任务栏按钮同步显示进度**（暂停变黄、失败变红），出错时闪烁提醒；Windows 11 下窗口为圆角。
@@ -91,7 +92,7 @@ scoop install https://raw.githubusercontent.com/sliots/Unbox/rust/bucket/unbox.j
 
 ### 便携包
 
-从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.3-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
+从 [Releases](https://github.com/sliots/Unbox/releases) 下载 `Unbox-v2.0.4-win-x64.zip`（可用同页的 `SHA256SUMS.txt` 校验），解压到常用目录后执行：
 
 ```powershell
 .\unbox.exe register      # 登记关联并打开“默认应用”设置
@@ -141,7 +142,7 @@ unbox extract D:\Downloads\project.7z --password secret
 cargo build --release -p unbox            # target\release\unbox.exe
 copy assets\7z.dll target\release\        # 7z.dll 需与 unbox.exe 同目录
 .\scripts\package.ps1                     # 生成 dist\Unbox-v<版本>-win-x64.zip 与 SHA256SUMS.txt
-.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.3-win-x64
+.\scripts\smoke-test.ps1 -PackageDir dist\Unbox-v2.0.4-win-x64
 ```
 
 在 macOS / Linux 上交叉编译（需要 LLVM 提供 `clang-cl`、`llvm-rc`，首次会自动下载 MSVC CRT 与 Windows SDK）：
@@ -168,7 +169,7 @@ bucket/unbox.json   Scoop 清单（发布时由 CI 自动更新版本与哈希�
 - **发布**（`.github/workflows/release.yml`）：推送与 `Cargo.toml` 版本一致的标签即可：
 
   ```bash
-  git tag v2.0.3 && git push origin v2.0.3
+  git tag v2.0.4 && git push origin v2.0.4
   ```
 
   工作流会构建、测试、创建 GitHub Release（zip + SHA256SUMS.txt），并把新版本号与哈希写回 `rust` 分支的 `bucket/unbox.json`。

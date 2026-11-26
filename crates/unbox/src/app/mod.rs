@@ -29,7 +29,9 @@ use unbox_core::text::{describe_failure, format_bytes, format_duration, format_s
 slint::include_modules!();
 
 const MIB: u64 = 1024 * 1024;
-const GRAPH_W: f64 = 446.0; // 480 − 2 × 1 px frame − 2 × 16 px margin
+const GRAPH_W: f64 = 446.0;
+/// How long a task runs before its window appears.
+const SHOW_DELAY: Duration = Duration::from_millis(1000); // 480 − 2 × 1 px frame − 2 × 16 px margin
 const GRAPH_H: f64 = 92.0;
 
 // ---------------------------------------------------------------------------
@@ -172,6 +174,10 @@ struct Controller {
     source_identity: Option<VolumeIdentity>,
     taskbar: Option<Taskbar>,
     hwnd: Option<windows_sys::Win32::Foundation::HWND>,
+    /// The window has been shown. Quick, uneventful extractions finish without it.
+    shown: bool,
+    last_taskbar: (TaskbarState, f64),
+    wants_attention: bool,
 
     paused: bool,
     completed: bool,
@@ -217,8 +223,48 @@ impl Controller {
     }
 
     fn taskbar(&mut self, state: TaskbarState, value: f64) {
+        self.last_taskbar = (state, value);
         if let Some(taskbar) = self.taskbar.as_mut() {
             taskbar.set(state, value);
+        }
+    }
+
+    /// Show the window: once the task has run for a while, or when it needs the user
+    /// (a prompt, a failure, a partial result). The native polish needs the HWND, which
+    /// exists once the window is shown.
+    fn reveal(&mut self) {
+        if self.shown {
+            return;
+        }
+        self.shown = true;
+        let ui = self.ui();
+        if let Err(e) = ui.show() {
+            eprintln!("无法显示窗口：{e}");
+            return;
+        }
+        slint::Timer::single_shot(Duration::from_millis(0), || {
+            with_controller(|c| {
+                let ui = c.ui();
+                if let Some(hwnd) = effects::hwnd_of(ui.window()) {
+                    effects::polish_window(hwnd);
+                    c.hwnd = Some(hwnd);
+                    let mut taskbar = Taskbar::new(hwnd);
+                    taskbar.set(c.last_taskbar.0, c.last_taskbar.1);
+                    c.taskbar = Some(taskbar);
+                    if c.wants_attention {
+                        effects::demand_attention(hwnd);
+                    }
+                }
+                ui.set_appeared(true);
+            });
+        });
+    }
+
+    fn attention(&mut self) {
+        self.wants_attention = true;
+        self.reveal();
+        if let Some(hwnd) = self.hwnd {
+            effects::demand_attention(hwnd);
         }
     }
 
@@ -312,7 +358,7 @@ impl Controller {
             }
             Msg::SoundDone(auto_close) => {
                 if auto_close && !self.close_requested {
-                    slint::Timer::single_shot(Duration::from_millis(800), || slint::quit_event_loop().unwrap_or_default());
+                    let _ = slint::quit_event_loop();
                 }
             }
             Msg::Stopped => {
@@ -499,6 +545,7 @@ impl Controller {
         ui.set_prompt_input(SharedString::default());
         ui.set_prompt_error(SharedString::default());
         ui.set_prompt(kind);
+        self.reveal();
         if let Some(hwnd) = self.hwnd {
             unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
@@ -646,9 +693,7 @@ impl Controller {
         self.set_status(title);
         ui.set_path_info(message.into());
         self.taskbar(TaskbarState::Error, 1.0);
-        if let Some(hwnd) = self.hwnd {
-            effects::demand_attention(hwnd);
-        }
+        self.attention();
     }
 
     fn fail_without_commit(&mut self, detail: &str, keep_staging: bool) {
@@ -667,9 +712,7 @@ impl Controller {
             }
         }
         self.taskbar(TaskbarState::Error, 1.0);
-        if let Some(hwnd) = self.hwnd {
-            effects::demand_attention(hwnd);
-        }
+        self.attention();
     }
 
     // ----- completion -----
@@ -815,6 +858,7 @@ impl Controller {
                     ui.set_state(TaskState::Warning);
                     self.set_status("部分完成");
                     ui.set_path_info(format!("{notes}；源压缩包已保留。").into());
+                    self.reveal();
                 } else if let Some(r) = recycle.as_ref().filter(|_| recycle_problem) {
                     ui.set_state(TaskState::Warning);
                     let all_unavailable = !r.items.is_empty() && r.items.iter().all(|i| i.bin_unavailable);
@@ -829,6 +873,7 @@ impl Controller {
                     let tail =
                         if failures.is_empty() { String::new() } else { format!("（回收未确认：{}）", failures.join("；")) };
                     ui.set_path_info(format!("解压已完成并已逐项校验。{}。{tail}", r.message).into());
+                    self.reveal();
                     std::thread::spawn(|| {
                         effects::play_finished_sound();
                         post(Msg::SoundDone(false));
@@ -842,10 +887,17 @@ impl Controller {
                         text.push_str(&r.message);
                     }
                     ui.set_path_info(text.into());
-                    std::thread::spawn(|| {
-                        effects::play_finished_sound();
-                        post(Msg::SoundDone(true));
-                    });
+                    if self.shown {
+                        // Done: the window goes away at once; the chime plays out after it.
+                        let _ = ui.hide();
+                        std::thread::spawn(|| {
+                            effects::play_finished_sound();
+                            post(Msg::SoundDone(true));
+                        });
+                    } else {
+                        // Finished before the window was due: nothing to show.
+                        let _ = slint::quit_event_loop();
+                    }
                 }
             }
         }
@@ -1176,6 +1228,9 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
         meter: SpeedMeter::default(),
         graph: SpeedGraph::default(),
         prompt: PromptCtx::None,
+        shown: false,
+        last_taskbar: (TaskbarState::None, 0.0),
+        wants_attention: false,
     }));
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
 
@@ -1217,22 +1272,15 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
     let ticker = slint::Timer::default();
     ticker.start(slint::TimerMode::Repeated, Duration::from_millis(100), || with_controller(|c| c.tick()));
 
-    if let Err(e) = ui.show() {
-        eprintln!("无法显示窗口：{e}");
-        return 1;
-    }
-    // Native polish needs the HWND, which exists once the event loop has started.
-    slint::Timer::single_shot(Duration::from_millis(0), || {
+    // Like Explorer's copy dialog, the window only appears when the task takes a while
+    // (or needs the user); a small archive is extracted without any window at all.
+    slint::Timer::single_shot(Duration::from_millis(0), || with_controller(|c| c.start()));
+    slint::Timer::single_shot(SHOW_DELAY, || {
         with_controller(|c| {
-            let ui = c.ui();
-            if let Some(hwnd) = effects::hwnd_of(ui.window()) {
-                effects::polish_window(hwnd);
-                c.hwnd = Some(hwnd);
-                c.taskbar = Some(Taskbar::new(hwnd));
+            if !c.completed {
+                c.reveal();
             }
-            ui.set_appeared(true);
-            c.start();
-        });
+        })
     });
 
     let _ = slint::run_event_loop_until_quit();
