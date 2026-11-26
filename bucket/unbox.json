@@ -1,5 +1,5 @@
 {
-    "version": "2.0.4",
+    "version": "2.0.5",
     "description": "双击即解压：Windows 11 复制对话框风格的解压代理（7-Zip ZS 引擎）",
     "homepage": "https://github.com/sliots/Unbox",
     "license": "MIT,LGPL-2.1-or-later",
@@ -10,11 +10,11 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/sliots/Unbox/releases/download/v2.0.4/Unbox-v2.0.4-win-x64.zip",
-            "hash": "ae0d39c441eaf5c67d6556a917cab4e5eb9ba945784d6172739a2f90eee110ad"
+            "url": "https://github.com/sliots/Unbox/releases/download/v2.0.5/Unbox-v2.0.5-win-x64.zip",
+            "hash": "431755fd10b48dde89cda7ef979f3a34d297b4314e7b6c0b2100c5940b2ec0fe"
         }
     },
-    "extract_dir": "Unbox-v2.0.4-win-x64",
+    "extract_dir": "Unbox-v2.0.5-win-x64",
     "bin": "unbox.exe",
     "shortcuts": [
         [
