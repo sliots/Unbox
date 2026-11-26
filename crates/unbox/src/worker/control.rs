@@ -121,8 +121,8 @@ impl Control {
         });
     }
 
-    /// Ask the UI for a password. `None` when canceled.
-    pub fn request_password(&self) -> Option<String> {
+    /// Ask the UI for a password (`retry` after a wrong one). `None` when canceled.
+    pub fn request_password(&self, retry: bool) -> Option<String> {
         let mut state = self.state.lock().unwrap();
         if state.canceled {
             return None;
@@ -130,7 +130,7 @@ impl Control {
         state.password_pending = true;
         state.password = None;
         drop(state);
-        self.send(&WorkerEvent::PasswordRequest);
+        self.send(&WorkerEvent::PasswordRequest { retry });
         let mut state = self.state.lock().unwrap();
         while state.password.is_none() && !state.canceled {
             state = self.changed.wait(state).unwrap();
@@ -182,34 +182,112 @@ pub fn wait_for_start() -> bool {
         && matches!(serde_json::from_str::<WorkerCommand>(line.trim()), Ok(WorkerCommand::Start))
 }
 
-/// One password per archive attempt, shared by the open and extract callbacks.
+/// The password of one archive: automatic guesses first, then the user, who is asked
+/// again after every rejected answer. Shared by the open and extract callbacks.
 #[derive(Default)]
 pub struct ArchivePassword {
-    inner: Mutex<(bool, Option<Vec<u16>>)>,
+    inner: Mutex<PasswordState>,
+}
+
+#[derive(Default)]
+struct PasswordState {
+    /// A password was needed at some point.
+    requested: bool,
+    /// A password was needed during the current open attempt.
+    asked: bool,
+    current: Option<Vec<u16>>,
+    current_from_user: bool,
+    user_rejected: bool,
+    guesses: std::collections::VecDeque<String>,
+    guess_total: u32,
+    guess_tried: u32,
+}
+
+fn wipe_wide(text: &mut [u16]) {
+    text.iter_mut().for_each(|c| unsafe { std::ptr::write_volatile(c, 0) });
 }
 
 impl ArchivePassword {
-    pub fn requested(&self) -> bool {
-        self.inner.lock().unwrap().0
+    pub fn with_guesses(guesses: Vec<String>) -> Self {
+        let state = PasswordState { guess_total: guesses.len() as u32, guesses: guesses.into(), ..Default::default() };
+        ArchivePassword { inner: Mutex::new(state) }
     }
 
-    /// The UTF-16 password, asking once. `None` when canceled.
+    pub fn requested(&self) -> bool {
+        self.inner.lock().unwrap().requested
+    }
+
+    /// Start an open attempt; `asked` then tells whether this attempt needed a password.
+    pub fn begin_attempt(&self) {
+        self.inner.lock().unwrap().asked = false;
+    }
+
+    pub fn asked(&self) -> bool {
+        self.inner.lock().unwrap().asked
+    }
+
+    /// A candidate is in use (it opened the archive or passed verification).
+    pub fn has_current(&self) -> bool {
+        self.inner.lock().unwrap().current.is_some()
+    }
+
+    /// The plain-text candidate in use, used to seed the guesses of an inner archive.
+    pub fn current_text(&self) -> Option<String> {
+        self.inner.lock().unwrap().current.as_ref().map(|p| String::from_utf16_lossy(p))
+    }
+
+    /// Never guess again: used when a guess could not be verified before extraction.
+    pub fn drop_guesses(&self) {
+        let mut state = self.inner.lock().unwrap();
+        state.guesses.iter_mut().for_each(wipe);
+        state.guesses.clear();
+    }
+
+    /// The UTF-16 candidate: the current one, else the next guess, else the user's
+    /// answer. `None` when canceled.
     pub fn get(&self) -> Option<Vec<u16>> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.1.is_none() {
-            inner.0 = true;
-            let mut text = control().request_password()?;
-            inner.1 = Some(text.encode_utf16().collect());
-            wipe(&mut text);
+        let mut state = self.inner.lock().unwrap();
+        state.requested = true;
+        state.asked = true;
+        if state.current.is_none() {
+            if let Some(mut guess) = state.guesses.pop_front() {
+                state.guess_tried += 1;
+                control().send(&WorkerEvent::PasswordProbing { tried: state.guess_tried, total: state.guess_total });
+                state.current = Some(guess.encode_utf16().collect());
+                state.current_from_user = false;
+                wipe(&mut guess);
+            } else {
+                let retry = state.user_rejected;
+                drop(state);
+                let mut text = control().request_password(retry)?;
+                state = self.inner.lock().unwrap();
+                state.current = Some(text.encode_utf16().collect());
+                state.current_from_user = true;
+                wipe(&mut text);
+            }
         }
-        inner.1.clone()
+        state.current.clone()
+    }
+
+    /// The candidate in use is wrong: the next `get` moves on to the next guess or asks
+    /// the user again (telling them the previous answer was wrong).
+    pub fn reject(&self) {
+        let mut state = self.inner.lock().unwrap();
+        if let Some(mut p) = state.current.take() {
+            wipe_wide(&mut p);
+            if state.current_from_user {
+                state.user_rejected = true;
+            }
+        }
     }
 }
 
 impl Drop for ArchivePassword {
     fn drop(&mut self) {
-        if let Some(p) = self.inner.lock().unwrap().1.as_mut() {
-            p.iter_mut().for_each(|c| unsafe { std::ptr::write_volatile(c, 0) });
+        let state = self.inner.get_mut().unwrap();
+        if let Some(p) = state.current.as_mut() {
+            wipe_wide(p);
         }
+        state.guesses.iter_mut().for_each(wipe);
     }
 }

@@ -129,6 +129,64 @@ Check 'damaged archive is rejected without leftovers' {
     Assert-NoLeftovers $dir
 }
 
+# Encrypted archives need the 7-Zip command line (preinstalled on GitHub's Windows images).
+$sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+function New-Encrypted([string]$Archive, [string]$Password, [string[]]$Switches) {
+    & $sevenZip a -bso0 -bsp0 "-p$Password" @Switches $Archive (Join-Path $src '*') | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "7z a failed for $Archive" }
+}
+
+if (Test-Path -LiteralPath $sevenZip) {
+    Check 'password guessed from a folder word (encrypted headers)' {
+        $dir = Join-Path $work 'pw1\资料 s3cret 合集'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $archive = Join-Path $dir 'data.7z'
+        New-Encrypted $archive 's3cret' @('-mhe=on')
+        $r = Invoke-Unbox @('extract', $archive)
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert ((Get-Content -LiteralPath (Join-Path $dir 'data\root.txt') -Raw).Trim() -eq 'root') 'missing root.txt'
+        Assert-NoLeftovers $dir
+    }
+
+    Check 'password guessed from the archive name (zip AES)' {
+        $dir = Join-Path $work 'pw2'
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        $archive = Join-Path $dir 'hunter2.zip'
+        New-Encrypted $archive 'hunter2' @('-mem=AES256')
+        $r = Invoke-Unbox @('extract', $archive)
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'hunter2\中文目录\深层\data.bin')) 'missing data.bin'
+    }
+
+    Check 'password guessed for split 7z volumes' {
+        $dir = Join-Path $work 'pw3\vault'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $archive = Join-Path $dir 'parts.7z'
+        New-Encrypted $archive 'vault' @('-v8k', '-mx=0')
+        $r = Invoke-Unbox @('extract', "$archive.001")
+        Assert ($r.Code -eq 0) "exit $($r.Code): $($r.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'parts\root.txt')) "unexpected layout: $(Get-ChildItem -Recurse $dir | Out-String)"
+        Assert-NoLeftovers $dir
+    }
+
+    Check 'explicit password and wrong password' {
+        $dir = Join-Path $work 'pw4'
+        New-Item -ItemType Directory -Path $dir | Out-Null
+        $archive = Join-Path $dir 'locked.7z'
+        New-Encrypted $archive 'Not-Guessable-9' @()
+        $bad = Invoke-Unbox @('extract', $archive, '--password', 'nope')
+        Assert ($bad.Code -ne 0) "wrong password succeeded: $($bad.Out)"
+        Assert ($bad.Err -match '密码错误') "message: $($bad.Err)"
+        Assert (-not (Test-Path -LiteralPath (Join-Path $dir 'locked'))) 'output delivered with a wrong password'
+        Assert-NoLeftovers $dir
+        $good = Invoke-Unbox @('extract', $archive, '--password', 'Not-Guessable-9')
+        Assert ($good.Code -eq 0) "exit $($good.Code): $($good.Err)"
+        Assert (Test-Path -LiteralPath (Join-Path $dir 'locked\root.txt')) 'missing root.txt'
+    }
+} else {
+    Write-Warning "7-Zip not found at $sevenZip; password checks skipped."
+}
+
 Check 'register / status / unregister' {
     $r = Invoke-Unbox @('register', '--no-settings')
     Assert ($r.Code -eq 0) "register exit $($r.Code): $($r.Err)"

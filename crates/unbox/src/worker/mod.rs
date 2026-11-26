@@ -12,7 +12,7 @@ use control::{control, ArchivePassword};
 use sevenzip::*;
 use std::ffi::OsString;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use unbox_core::budget::{default_budget, parse_budget, OutputBudget};
 use unbox_core::catalog::{classify, default_stream_name, ArchiveKind};
 use unbox_core::decode::{candidate_code_pages, code_page_label, decode_one, utf8_validity};
@@ -191,6 +191,98 @@ fn encoding_options(preferred: u32, archive_path: &str) -> Vec<EncodingOption> {
 }
 
 // ---------------------------------------------------------------------------
+// Passwords
+// ---------------------------------------------------------------------------
+
+enum OpenFailure {
+    Canceled,
+    Unrecognized,
+}
+
+struct Opened {
+    archive: IInArchive,
+    handler: String,
+    callback: IArchiveOpenCallback,
+    state: Arc<Mutex<OpenState>>,
+}
+
+/// Open the archive. When opening needs a password (encrypted headers), a wrong guess
+/// or answer makes the open fail; the next guess is tried, then the user is asked again
+/// until the archive opens or the task is canceled.
+#[allow(clippy::too_many_arguments)]
+fn open_with_password(
+    lib: &SevenZip,
+    stream: &IInStream,
+    path: &str,
+    ext: &str,
+    code_page: u32,
+    hints: &[String],
+    require_hint: bool,
+    password: Option<&Arc<ArchivePassword>>,
+) -> Result<Opened, OpenFailure> {
+    loop {
+        if let Some(p) = password {
+            p.begin_attempt();
+        }
+        let (callback, state) = OpenCallback::create(path, password.cloned());
+        // Once a handler asks for a password the format is known: no other handler is tried.
+        let stop = || control().canceled() || password.is_some_and(|p| p.asked());
+        if let Some((archive, handler)) = lib.open(stream, ext, &callback, code_page, hints, require_hint, &stop) {
+            return Ok(Opened { archive, handler, callback, state });
+        }
+        if control().canceled() {
+            return Err(OpenFailure::Canceled);
+        }
+        match password {
+            Some(p) if p.asked() => p.reject(),
+            _ => return Err(OpenFailure::Unrecognized),
+        }
+    }
+}
+
+/// Settle the password before extraction by decoding one encrypted item: guesses are
+/// tried silently, then the user is asked until a password decodes it. Returns `false`
+/// when canceled.
+fn verify_password(archive: &IInArchive, count: u32, password: &ArchivePassword) -> bool {
+    if password.has_current() {
+        return true; // The encrypted headers already proved it.
+    }
+    // The cheapest item to decode: the first one of a solid stream, else the smallest.
+    let mut solid = PropVariant::default();
+    unsafe {
+        let _ = archive.GetArchiveProperty(prop::SOLID, &mut solid);
+    }
+    let solid = solid.as_bool();
+    let mut best: Option<(u64, u32)> = None;
+    for index in 0..count {
+        if !item_property(archive, index, prop::ENCRYPTED).as_bool() || item_property(archive, index, prop::IS_DIR).as_bool() {
+            continue;
+        }
+        let size = item_property(archive, index, prop::SIZE).as_u64();
+        if size == Some(0) {
+            continue;
+        }
+        let key = if solid { index as u64 } else { size.unwrap_or(u64::MAX) };
+        if best.is_none_or(|(k, _)| key < k) {
+            best = Some((key, index));
+        }
+    }
+    let Some((_, index)) = best else {
+        // Nothing to verify against: a password, if any, comes from the user only.
+        password.drop_guesses();
+        return true;
+    };
+    loop {
+        let Some(candidate) = password.get() else { return false };
+        match probe_password(archive, index, candidate) {
+            Probe::Correct | Probe::Unknown => return true,
+            Probe::Wrong if control().canceled() => return false,
+            Probe::Wrong => password.reject(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Inner expansion (compound TAR / split payloads)
 // ---------------------------------------------------------------------------
 
@@ -236,6 +328,7 @@ impl InnerResult {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn expand_inner(
     lib: &SevenZip,
     staging: &str,
@@ -244,6 +337,7 @@ fn expand_inner(
     require_tar: bool,
     strict: bool,
     explicit_budget: u64,
+    guesses: Vec<String>,
 ) -> InnerResult {
     let payload_path = Path::new(payload);
     let is_tar = looks_like_tar(payload_path);
@@ -259,13 +353,13 @@ fn expand_inner(
     let Some(stream) = InFileStream::open(payload, false) else {
         return InnerResult::new(InnerKind::Failed, "cannot_open_inner_stream");
     };
-    let password = (!require_tar).then(|| Arc::new(ArchivePassword::default()));
-    let (open_cb, _) = OpenCallback::create(payload, password.clone());
+    let password = (!require_tar).then(|| Arc::new(ArchivePassword::with_guesses(guesses)));
     let hints: Vec<String> = if require_tar { vec!["tar".into()] } else { Vec::new() };
-    let stop = || control().canceled() || password.as_ref().is_some_and(|p| p.requested());
-    let Some((archive, _)) = lib.open(&stream, &ext, &open_cb, cp, &hints, require_tar, &stop) else {
-        let kind = if control().canceled() { InnerKind::Canceled } else { InnerKind::Failed };
-        return InnerResult::new(kind, "unrecognized_or_corrupted_inner_archive");
+    let opened = open_with_password(lib, &stream, payload, &ext, cp, &hints, require_tar, password.as_ref());
+    let (archive, open_cb) = match opened {
+        Ok(opened) => (opened.archive, opened.callback),
+        Err(OpenFailure::Canceled) => return InnerResult::new(InnerKind::Canceled, ""),
+        Err(OpenFailure::Unrecognized) => return InnerResult::new(InnerKind::Failed, "unrecognized_or_corrupted_inner_archive"),
     };
     let mut count = 0u32;
     if has_archive_errors(&archive) || unsafe { archive.GetNumberOfItems(&mut count) }.is_err() {
@@ -273,6 +367,14 @@ fn expand_inner(
             let _ = archive.Close();
         }
         return InnerResult::new(InnerKind::Failed, "corrupted_inner_archive");
+    }
+    if let Some(password) = &password {
+        if !verify_password(&archive, count, password) {
+            unsafe {
+                let _ = archive.Close();
+            }
+            return InnerResult::new(InnerKind::Canceled, "");
+        }
     }
 
     // Isolated delivery root committed only after the inner archive fully succeeds.
@@ -422,8 +524,8 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         error(format!("Cannot open archive file: {}", args.archive), None);
         return 3;
     };
-    let password = Arc::new(ArchivePassword::default());
-    let (open_cb, open_state) = OpenCallback::create(&args.archive, Some(password.clone()));
+    let guesses = unbox_core::password::guesses(Path::new(&args.archive));
+    let password = Arc::new(ArchivePassword::with_guesses(guesses.clone()));
 
     let leaf = Path::new(&args.archive).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let route = classify(&leaf);
@@ -431,18 +533,18 @@ pub fn run(raw_args: &[OsString]) -> i32 {
     let split = route.kind == ArchiveKind::Split;
     let ext = Path::new(&args.archive).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
     let open_cp = if args.code_page != 0 { args.code_page } else { default_archive_code_page() };
-    let stop = || control().canceled() || password.requested();
-    let Some((archive, handler)) = lib.open(&stream, &ext, &open_cb, open_cp, &route.handler_hints, compound_tar || split, &stop) else {
-        if control().canceled() {
+    let opened =
+        open_with_password(&lib, &stream, &args.archive, &ext, open_cp, &route.handler_hints, compound_tar || split, Some(&password));
+    let Opened { archive, handler, callback: open_cb, state: open_state } = match opened {
+        Ok(opened) => opened,
+        Err(OpenFailure::Canceled) => {
             control().send(&WorkerEvent::Canceled);
             return 0;
         }
-        if password.requested() {
-            error("Password incorrect or data damaged", Some("password_or_data_error"));
-        } else {
+        Err(OpenFailure::Unrecognized) => {
             error("Unsupported or unrecognized archive format", None);
+            return 4;
         }
-        return 4;
     };
 
     let close = |archive: &IInArchive| unsafe {
@@ -453,6 +555,11 @@ pub fn run(raw_args: &[OsString]) -> i32 {
         close(&archive);
         error("Archive is damaged or incomplete", None);
         return 5;
+    }
+    if !verify_password(&archive, count, &password) {
+        close(&archive);
+        control().send(&WorkerEvent::Canceled);
+        return 0;
     }
 
     let mut effective_cp = open_cp;
@@ -661,7 +768,14 @@ pub fn run(raw_args: &[OsString]) -> i32 {
     if !hard_failure && needs_inner {
         if delivered.len() == 1 && !delivered[0].is_dir {
             let payload = delivered[0].disk_path.clone();
-            let inner = expand_inner(&lib, &staging, &payload, effective_cp, compound_tar, cp_explicit, args.inner_budget);
+            // The outer password (if any) is the likeliest one for the inner archive.
+            let inner_guesses = password.current_text().into_iter().chain(guesses.iter().cloned()).fold(Vec::new(), |mut all, g| {
+                if !all.contains(&g) {
+                    all.push(g);
+                }
+                all
+            });
+            let inner = expand_inner(&lib, &staging, &payload, effective_cp, compound_tar, cp_explicit, args.inner_budget, inner_guesses);
             match inner.kind {
                 InnerKind::Success => {
                     delivered = inner.items;

@@ -345,9 +345,16 @@ impl Controller {
             }
             WorkerEvent::InvalidCharsFound { items } => self.ask_invalid_names(items),
             WorkerEvent::EncodingOptions { options } => self.ask_encoding(options),
-            WorkerEvent::PasswordRequest => {
+            WorkerEvent::PasswordRequest { retry } => {
                 self.prompt = PromptCtx::Password;
                 self.show_prompt(PromptKind::Password, "输入密码", "确定");
+                if retry {
+                    self.ui().set_prompt_error("密码错误，请重新输入。".into());
+                }
+            }
+            WorkerEvent::PasswordProbing { tried, total } => {
+                self.ui().set_indeterminate(true);
+                self.set_status(&format!("正在尝试密码 {tried}/{total}"));
             }
             WorkerEvent::Finished(report) => self.on_finished(report),
             WorkerEvent::Canceled => self.request_close(),
@@ -549,6 +556,7 @@ impl Controller {
             PromptCtx::Password => {
                 let password = ui.get_prompt_input().to_string();
                 self.send(WorkerCommand::PasswordResponse { password });
+                self.set_status("正在验证密码…");
             }
             PromptCtx::InvalidNames => {
                 let action = if ui.get_prompt_choice() == 0 { InvalidCharsAction::BatchRename } else { InvalidCharsAction::Skip };

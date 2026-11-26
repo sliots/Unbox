@@ -586,3 +586,141 @@ impl ICryptoGetTextPassword2_Impl for ExtractCallback_Impl {
         hr
     }
 }
+
+// ---------------------------------------------------------------------------
+// Password probe: decode one encrypted item into a counting sink
+// ---------------------------------------------------------------------------
+
+/// Output read before a candidate counts as verified when the item is larger: every
+/// supported cipher fails a wrong key long before that (AES / ZipCrypto check values,
+/// LZMA / Deflate stream errors), and small items are fully CRC-checked.
+const PROBE_LIMIT: u64 = 4 << 20;
+
+#[derive(Default)]
+struct ProbeState {
+    /// The probed item is being decoded (solid streams also report skipped items).
+    active: bool,
+    written: u64,
+    capped: bool,
+    result: Option<i32>,
+}
+
+#[implement(ISequentialOutStream)]
+struct ProbeSink {
+    state: Arc<Mutex<ProbeState>>,
+}
+
+impl ISequentialOutStream_Impl for ProbeSink_Impl {
+    unsafe fn Write(&self, _data: *const c_void, size: u32, processed: *mut u32) -> HRESULT {
+        if !processed.is_null() {
+            *processed = size;
+        }
+        if control().canceled() {
+            return E_ABORT;
+        }
+        let mut state = self.state.lock().unwrap();
+        state.written += size as u64;
+        if state.written >= PROBE_LIMIT {
+            state.capped = true;
+            return E_ABORT;
+        }
+        S_OK
+    }
+}
+
+#[implement(IArchiveExtractCallback, ICryptoGetTextPassword, ICryptoGetTextPassword2)]
+struct ProbeCallback {
+    index: u32,
+    password: Vec<u16>,
+    state: Arc<Mutex<ProbeState>>,
+}
+
+impl Drop for ProbeCallback {
+    fn drop(&mut self) {
+        self.password.iter_mut().for_each(|c| unsafe { std::ptr::write_volatile(c, 0) });
+    }
+}
+
+impl IArchiveExtractCallback_Impl for ProbeCallback_Impl {
+    unsafe fn SetTotal(&self, _total: u64) -> HRESULT {
+        S_OK
+    }
+    unsafe fn SetCompleted(&self, _complete: *const u64) -> HRESULT {
+        if control().canceled() {
+            E_ABORT
+        } else {
+            S_OK
+        }
+    }
+    unsafe fn GetStream(&self, index: u32, stream: *mut *mut c_void, ask_mode: i32) -> HRESULT {
+        if stream.is_null() {
+            return E_POINTER;
+        }
+        *stream = std::ptr::null_mut();
+        let active = index == self.index && ask_mode == ask::EXTRACT;
+        self.state.lock().unwrap().active = active;
+        if active {
+            let sink: ISequentialOutStream = ProbeSink { state: self.state.clone() }.into();
+            *stream = sink.into_raw();
+        }
+        S_OK
+    }
+    unsafe fn PrepareOperation(&self, _ask_mode: i32) -> HRESULT {
+        S_OK
+    }
+    unsafe fn SetOperationResult(&self, result: i32) -> HRESULT {
+        let mut state = self.state.lock().unwrap();
+        if std::mem::take(&mut state.active) {
+            state.result = Some(result);
+        }
+        S_OK
+    }
+}
+
+impl ICryptoGetTextPassword_Impl for ProbeCallback_Impl {
+    unsafe fn CryptoGetTextPassword(&self, password: *mut *mut u16) -> HRESULT {
+        if password.is_null() {
+            return E_POINTER;
+        }
+        *password = alloc_bstr(&self.password);
+        if (*password).is_null() {
+            E_OUTOFMEMORY
+        } else {
+            S_OK
+        }
+    }
+}
+
+impl ICryptoGetTextPassword2_Impl for ProbeCallback_Impl {
+    unsafe fn CryptoGetTextPassword2(&self, defined: *mut i32, password: *mut *mut u16) -> HRESULT {
+        if defined.is_null() {
+            return E_POINTER;
+        }
+        *defined = 1;
+        ICryptoGetTextPassword_Impl::CryptoGetTextPassword(self, password)
+    }
+}
+
+pub enum Probe {
+    Correct,
+    Wrong,
+    /// The engine cannot decode this item at all (unsupported method): no verdict.
+    Unknown,
+}
+
+/// Decode item `index` with `password` without writing anything to disk.
+pub fn probe_password(archive: &IInArchive, index: u32, password: Vec<u16>) -> Probe {
+    let state = Arc::new(Mutex::new(ProbeState::default()));
+    let callback: IArchiveExtractCallback = ProbeCallback { index, password, state: state.clone() }.into();
+    let hr = unsafe { archive.Extract(&index, 1, 0, callback.as_raw()) };
+    drop(callback);
+    let state = state.lock().unwrap();
+    if state.capped {
+        return Probe::Correct;
+    }
+    match state.result {
+        Some(op_result::OK) if hr == S_OK => Probe::Correct,
+        Some(op_result::UNSUPPORTED_METHOD) => Probe::Unknown,
+        _ => Probe::Wrong,
+    }
+}

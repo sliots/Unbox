@@ -87,12 +87,13 @@ pub fn extract_cli(args: &[std::ffi::OsString]) -> i32 {
                 eprintln!("文件名编码不确定，按 {} 解码。", unbox_core::decode::code_page_label(cp));
                 worker.send(&WorkerCommand::EncodingResponse { cp });
             }
-            WorkerEvent::PasswordRequest => match (&options.password, password_sent) {
+            WorkerEvent::PasswordRequest { .. } => match (&options.password, password_sent) {
                 (Some(password), false) => {
                     password_sent = true;
                     worker.send(&WorkerCommand::PasswordResponse { password: password.clone() });
                 }
-                _ => return fail("压缩包需要密码（使用 --password 提供）"),
+                (Some(_), true) => return fail("密码错误"),
+                (None, _) => return fail("压缩包需要密码，自动尝试的密码都不对（使用 --password 提供）"),
             },
             WorkerEvent::Error { message, error_reason } => {
                 let message = error_reason.map(|r| describe_failure(&r, -1, "failed")).unwrap_or(message);
@@ -131,7 +132,11 @@ pub fn extract_cli(args: &[std::ffi::OsString]) -> i32 {
                     }
                 };
             }
-            WorkerEvent::Init { .. } | WorkerEvent::Progress { .. } | WorkerEvent::PausedAck | WorkerEvent::ResumedAck => {}
+            WorkerEvent::Init { .. }
+            | WorkerEvent::PasswordProbing { .. }
+            | WorkerEvent::Progress { .. }
+            | WorkerEvent::PausedAck
+            | WorkerEvent::ResumedAck => {}
         }
     }
     let code = worker.wait_exit(Duration::from_secs(5)).unwrap_or(-1);

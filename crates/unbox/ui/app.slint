@@ -411,6 +411,7 @@ export component AppWindow inherits Window {
         : root.state == TaskState.failed ? Theme.red
         : Theme.accent;
     property <length> chrome: 1px + 30px + 1px;
+    property <length> content-width: 480px - 2px;
     property <length> sheet-height: root.prompt == PromptKind.password ? password-sheet.preferred-height
         : root.prompt == PromptKind.invalid-names ? names-sheet.preferred-height
         : root.prompt == PromptKind.encoding ? encoding-sheet.preferred-height
@@ -525,7 +526,7 @@ export component AppWindow inherits Window {
         content := Rectangle {
             x: 1px;
             y: 31px;
-            width: parent.width - 2px;
+            width: root.content-width;
             height: parent.height - 32px;
             visible: !root.prompt-open;
             opacity: root.appeared ? 1 : 0;
@@ -717,12 +718,15 @@ export component AppWindow inherits Window {
         prompt-host := Rectangle {
             x: 1px;
             y: 31px;
-            width: parent.width - 2px;
+            // A fixed width (the window is always 480 px) keeps the wrapped texts' heights
+            // independent of the window size they decide; measuring against the live width
+            // made the first layout see a narrow window and open the prompt far too tall.
+            width: root.content-width;
             height: parent.height - 32px;
             visible: root.prompt-open;
 
             password-sheet := PromptSheet {
-                width: parent.width;
+                width: root.content-width;
                 visible: root.prompt == PromptKind.password;
                 submit: root.prompt-submit;
                 accepted => { root.prompt-accepted(); }
@@ -737,11 +741,18 @@ export component AppWindow inherits Window {
                         text <=> root.prompt-input;
                         accepted => { root.prompt-accepted(); }
                     }
+                    Text {
+                        height: root.prompt-error == "" ? 0px : 16px;
+                        text: root.prompt-error;
+                        font-size: 12px;
+                        color: Theme.red;
+                        vertical-alignment: center;
+                    }
                 }
             }
 
             names-sheet := PromptSheet {
-                width: parent.width;
+                width: root.content-width;
                 visible: root.prompt == PromptKind.invalid-names;
                 submit: root.prompt-submit;
                 accepted => { root.prompt-accepted(); }
@@ -785,7 +796,7 @@ export component AppWindow inherits Window {
             }
 
             encoding-sheet := PromptSheet {
-                width: parent.width;
+                width: root.content-width;
                 visible: root.prompt == PromptKind.encoding;
                 submit: root.prompt-submit;
                 accepted => { root.prompt-accepted(); }
@@ -836,7 +847,7 @@ export component AppWindow inherits Window {
             }
 
             recycle-sheet := PromptSheet {
-                width: parent.width;
+                width: root.content-width;
                 visible: root.prompt == PromptKind.recycle-notice;
                 submit: root.prompt-submit;
                 accepted => { root.prompt-accepted(); }
@@ -851,7 +862,7 @@ export component AppWindow inherits Window {
             }
 
             budget-sheet := PromptSheet {
-                width: parent.width;
+                width: root.content-width;
                 visible: root.prompt == PromptKind.budget;
                 submit: root.prompt-submit;
                 accepted => { root.prompt-accepted(); }

@@ -192,6 +192,8 @@ pub mod prop {
     pub const NAME: u32 = 4;
     pub const IS_DIR: u32 = 6;
     pub const SIZE: u32 = 7;
+    pub const SOLID: u32 = 13;
+    pub const ENCRYPTED: u32 = 15;
     pub const SYM_LINK: u32 = 54;
     pub const IS_ALT_STREAM: u32 = 63;
     pub const ERROR_FLAGS: u32 = 71;

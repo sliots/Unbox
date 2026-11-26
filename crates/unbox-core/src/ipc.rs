@@ -22,7 +22,16 @@ pub enum WorkerEvent {
         total_bytes: u64,
         size_known: bool,
     },
-    PasswordRequest,
+    /// Ask the user for the password; `retry` after the previous answer was wrong.
+    PasswordRequest {
+        #[serde(default)]
+        retry: bool,
+    },
+    /// Trying the `tried`-th of `total` automatic password guesses.
+    PasswordProbing {
+        tried: u32,
+        total: u32,
+    },
     InvalidCharsFound {
         items: Vec<InvalidItem>,
     },
@@ -193,6 +202,10 @@ mod tests {
         let cmd = WorkerCommand::InvalidCharsResponse { action: InvalidCharsAction::BatchRename };
         assert_eq!(to_line(&cmd), r#"{"type":"invalid_chars_response","action":"batch_rename"}"#);
         assert_eq!(to_line(&WorkerCommand::Start), r#"{"type":"start"}"#);
+        assert_eq!(
+            serde_json::from_str::<WorkerEvent>(r#"{"type":"password_request"}"#).unwrap(),
+            WorkerEvent::PasswordRequest { retry: false }
+        );
     }
 
     #[test]

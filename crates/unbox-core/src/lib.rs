@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod lz4;
 pub mod manifest;
 pub mod naming;
+pub mod password;
 pub mod progress;
 pub mod raw_names;
 pub mod sanitize;
