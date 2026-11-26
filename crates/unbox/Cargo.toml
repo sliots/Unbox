@@ -20,7 +20,8 @@ slint = { version = "=1.19.1", default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit",
-    "renderer-software",
+    "unstable-winit-030",
+    "renderer-skia-software",
     "raw-window-handle-06",
     "accessibility",
 ] }

@@ -41,6 +41,17 @@ New-Item -ItemType Directory -Path (Join-Path $pkg 'licenses\7zip-zs') -Force | 
 
 Copy-Item -LiteralPath $exe -Destination (Join-Path $pkg 'unbox.exe')
 Copy-Item -LiteralPath $dll -Destination (Join-Path $pkg '7z.dll')
+
+# The Skia renderer links the dynamic VC++ runtime; ship it app-local (redistributable
+# files from the installed Visual Studio) so unbox.exe runs without vc_redist.
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+$crt = Get-ChildItem -Path (Join-Path $vs 'VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT') -Directory |
+    Sort-Object FullName -Descending | Select-Object -First 1
+if (-not $crt) { throw 'VC++ runtime redistributable not found.' }
+foreach ($runtime in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+    Copy-Item -LiteralPath (Join-Path $crt.FullName $runtime) -Destination $pkg
+}
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $pkg
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $pkg
 Copy-Item -LiteralPath (Join-Path $root 'assets\licenses\7zip-zs\THIRD-PARTY.txt') -Destination (Join-Path $pkg 'licenses\7zip-zs')

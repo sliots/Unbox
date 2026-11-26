@@ -29,7 +29,7 @@ use unbox_core::text::{describe_failure, format_bytes, format_duration, format_s
 slint::include_modules!();
 
 const MIB: u64 = 1024 * 1024;
-const GRAPH_W: f64 = 448.0;
+const GRAPH_W: f64 = 446.0; // 480 − 2 × 1 px frame − 2 × 16 px margin
 const GRAPH_H: f64 = 92.0;
 
 // ---------------------------------------------------------------------------
@@ -1112,6 +1112,22 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
     let settings_path = settings_path();
     let settings = UserSettings::load(&settings_path);
 
+    // Skia's CPU rasterizer: crisp DirectWrite text and anti-aliased shapes without
+    // depending on a GPU driver (VMs, Remote Desktop). The window has no native frame;
+    // winit keeps the DWM drop shadow for it.
+    let backend = slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name("skia-software".into())
+        .with_winit_window_attributes_hook(|attributes| {
+            use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+            attributes.with_undecorated_shadow(true)
+        })
+        .select();
+    if let Err(e) = backend {
+        eprintln!("无法初始化界面：{e}");
+        return 1;
+    }
+
     let ui = match AppWindow::new() {
         Ok(ui) => ui,
         Err(e) => {
@@ -1121,6 +1137,7 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
     };
     ui.set_expanded(settings.is_details_expanded);
     ui.set_recycle_checked(settings.recycle_on_success);
+    ui.set_rounded(effects::is_windows_11());
 
     let controller = Rc::new(RefCell::new(Controller {
         ui: ui.as_weak(),
@@ -1157,6 +1174,13 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
     ui.on_pause_clicked(|| with_controller(|c| c.pause_resume()));
     ui.on_cancel_clicked(|| with_controller(|c| c.request_close()));
     ui.on_close_clicked(|| with_controller(|c| c.request_close()));
+    ui.on_minimize_clicked(|| {
+        with_controller(|c| {
+            if let Some(hwnd) = c.hwnd {
+                effects::minimize(hwnd);
+            }
+        })
+    });
     ui.on_toggle_details(|| with_controller(|c| c.toggle_details()));
     ui.on_recycle_toggled(|checked| with_controller(|c| c.recycle_toggled(checked)));
     ui.on_open_folder(|| with_controller(|c| c.open_folder()));
@@ -1194,7 +1218,7 @@ pub fn run(archive: Option<std::ffi::OsString>) -> i32 {
         with_controller(|c| {
             let ui = c.ui();
             if let Some(hwnd) = effects::hwnd_of(ui.window()) {
-                effects::polish_window(hwnd, effects::system_uses_dark_theme());
+                effects::polish_window(hwnd);
                 c.hwnd = Some(hwnd);
                 c.taskbar = Some(Taskbar::new(hwnd));
             }

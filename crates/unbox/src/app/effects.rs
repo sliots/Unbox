@@ -1,4 +1,4 @@
-//! Native window polish: DWM backdrop and title bar, taskbar progress, attention
+//! Native window polish: DWM corners and frame, taskbar progress, attention
 //! flashing and the completion sound.
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -20,22 +20,25 @@ pub fn hwnd_of(window: &slint::Window) -> Option<HWND> {
     }
 }
 
-pub fn system_uses_dark_theme() -> bool {
-    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-        .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
-        .is_ok_and(|v| v == 0)
+/// Windows 11 (build 22000+) draws rounded frames; Windows 10 keeps square corners.
+pub fn is_windows_11() -> bool {
+    winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        .and_then(|k| k.get_value::<String, _>("CurrentBuildNumber"))
+        .ok()
+        .and_then(|b| b.trim().parse::<u32>().ok())
+        .is_some_and(|b| b >= 22000)
 }
 
-/// Dark title bar to match the theme, Mica on the caption, and no maximize/resize.
-pub fn polish_window(hwnd: HWND, dark: bool) {
+/// The window draws its own title bar and 1 px frame (like the 1.x WPF window):
+/// ask DWM for rounded corners, drop its own border so the frame is not doubled, and
+/// remove maximize/resize.
+pub fn polish_window(hwnd: HWND) {
     unsafe {
-        let dark_flag: i32 = dark as i32;
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, &dark_flag as *const _ as *const _, 4);
-        let backdrop: i32 = 2; // DWMSBT_MAINWINDOW (Mica)
-        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE as u32, &backdrop as *const _ as *const _, 4);
         let corner: i32 = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, &corner as *const _ as *const _, 4);
+        let no_border: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, &no_border as *const _ as *const _, 4);
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         let trimmed = style & !((WS_MAXIMIZEBOX | WS_THICKFRAME) as isize);
         if trimmed != style {
@@ -50,6 +53,12 @@ pub fn polish_window(hwnd: HWND, dark: bool) {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
         }
+    }
+}
+
+pub fn minimize(hwnd: HWND) {
+    unsafe {
+        ShowWindow(hwnd, SW_MINIMIZE);
     }
 }
 

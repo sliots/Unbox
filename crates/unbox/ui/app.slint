@@ -1,5 +1,7 @@
-// Unbox progress window — modelled on the Windows 11 file copy dialog.
-import { LineEdit, CheckBox, ScrollView, Button, Palette } from "std-widgets.slint";
+// Unbox progress window — a 1:1 rebuild of the 1.x WPF window (Windows 11 copy dialog
+// style): custom 30 px title bar, 1 px frame, 16 px content margins, 12 px progress bar,
+// 92 px throughput graph and the same light/dark palette.
+import { ScrollView, Palette } from "std-widgets.slint";
 
 export struct EncodingChoice {
     label: string,
@@ -9,42 +11,61 @@ export struct EncodingChoice {
 // Visual state of the task.
 export enum TaskState { running, paused, verifying, done, warning, failed }
 
-// Which sheet is shown over the window.
+// Which prompt is shown in the window.
 export enum PromptKind { none, password, invalid-names, encoding, recycle-notice, budget }
 
+// Colours of the 1.x WPF window (ApplyWin11Theme).
 global Theme {
     in-out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     out property <color> background: dark ? #202020 : #ffffff;
-    out property <color> footer: dark ? #1c1c1c : #f3f3f3;
-    out property <color> card: dark ? #2b2b2b : #f9f9f9;
     out property <color> border: dark ? #383838 : #d7d7d7;
-    out property <color> text: dark ? #ffffff : #1a1a1a;
+    out property <color> card: dark ? #2b2b2b : #f9f9f9;
+    out property <color> text: dark ? #ffffff : #191919;
     out property <color> subtext: dark ? #b9b9b9 : #646464;
-    out property <color> hover: dark ? #ffffff14 : #0000000d;
-    out property <color> pressed: dark ? #ffffff0d : #00000014;
-    out property <color> track: dark ? #ffffff1f : #0000001a;
+    out property <color> title-disabled: dark ? #5a5a5a : #bebebe;
+    out property <color> hover: dark ? #383838 : #ebebeb;
+    out property <color> pressed: dark ? #424242 : #e1e1e1;
+    out property <color> track: dark ? #373737 : #e6e6e6;
     out property <color> accent: dark ? #4cc2ff : #107c41;
     out property <color> paused: dark ? #fce100 : #c19c00;
-    out property <color> warning: dark ? #fce100 : #9d5d00;
-    out property <color> danger: dark ? #ff99a4 : #c42b1c;
-    out property <color> success: dark ? #6ccb5f : #0f7b0f;
+    out property <color> amber: #c19c00;
+    out property <color> red: #c42b1c;
+    out property <color> close-hover: #e81123;
     out property <color> grid: dark ? #ffffff16 : #00000016;
     out property <color> graph-border: dark ? #555555b2 : #cdcdcdb2;
     out property <color> reference: dark ? #ffffff96 : #00000096;
+    out property <color> graph-text: dark ? #ffffff : #141414;
 }
 
-// Flat icon button (pause / cancel) with an animated hover wash.
-component IconButton inherits Rectangle {
+// 46×30 caption button (minimize / maximize / close).
+component CaptionButton inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <bool> is-close;
+    in property <string> tooltip;
+    out property <bool> hovered: touch.has-hover && enabled;
+    callback clicked();
+    width: 46px;
+    height: 30px;
+    background: !root.hovered ? transparent : root.is-close ? Theme.close-hover : Theme.hover;
+    accessible-role: button;
+    accessible-label: tooltip;
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    @children
+}
+
+// 28×26 flat icon button (pause / cancel).
+component FlatIconButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <string> tooltip;
     callback clicked();
-    width: 30px;
-    height: 28px;
+    width: 28px;
+    height: 26px;
     border-radius: 4px;
     background: !enabled ? transparent : touch.pressed ? Theme.pressed : touch.has-hover ? Theme.hover : transparent;
     opacity: enabled ? 1 : 0.4;
-    animate background { duration: 120ms; }
-    animate opacity { duration: 150ms; }
     accessible-role: button;
     accessible-label: tooltip;
     touch := TouchArea {
@@ -55,19 +76,20 @@ component IconButton inherits Rectangle {
     @children
 }
 
-component AccentButton inherits Rectangle {
+// Text button: primary = accent fill with white text, otherwise card fill with a border.
+// At least 72 px wide so short labels (取消 / 关闭 / 确定) share one width.
+component PushButton inherits Rectangle {
     in property <string> text;
-    in property <bool> primary: true;
-    in property <color> accent: Theme.accent;
+    in property <bool> primary;
     callback clicked();
-    height: 30px;
-    min-width: label.preferred-width + 32px;
+    height: 28px;
+    width: max(72px, label.preferred-width + 32px);
     border-radius: 4px;
-    background: primary ? (touch.pressed ? accent.darker(0.2) : touch.has-hover ? accent.brighter(0.08) : accent)
-                        : (touch.pressed ? Theme.pressed : touch.has-hover ? Theme.hover : Theme.card);
-    border-width: primary ? 0px : 1px;
+    background: root.primary
+        ? (touch.pressed ? Theme.accent.darker(0.15) : touch.has-hover ? Theme.accent.brighter(0.08) : Theme.accent)
+        : (touch.pressed ? Theme.pressed : touch.has-hover ? Theme.hover : Theme.card);
+    border-width: root.primary ? 0px : 1px;
     border-color: Theme.border;
-    animate background { duration: 120ms; }
     accessible-role: button;
     accessible-label: text;
     label := Text {
@@ -83,52 +105,166 @@ component AccentButton inherits Rectangle {
     }
 }
 
+component CheckMark inherits Rectangle {
+    in property <bool> checked;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border-width: root.checked ? 0px : 1px;
+    border-color: Theme.subtext;
+    background: root.checked ? Theme.accent : transparent;
+    if root.checked: Path {
+        width: 9px;
+        height: 7px;
+        viewbox-width: 10;
+        viewbox-height: 8;
+        commands: "M 1 4.2 L 3.8 7 L 9 1.2";
+        stroke: #ffffff;
+        stroke-width: 1.4px;
+        stroke-line-cap: round;
+        fill: transparent;
+    }
+}
+
+component Check inherits Rectangle {
+    in-out property <bool> checked;
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <length> font-size: 12px;
+    in property <color> text-color: Theme.text;
+    callback toggled(bool);
+    height: max(16px, label.preferred-height);
+    width: row.preferred-width;
+    opacity: root.enabled ? 1 : 0.5;
+    accessible-role: checkbox;
+    accessible-checked: root.checked;
+    accessible-label: root.text;
+    row := HorizontalLayout {
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            CheckMark { checked: root.checked; }
+        }
+        label := Text {
+            text: root.text;
+            font-size: root.font-size;
+            color: root.text-color;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
 component Radio inherits Rectangle {
     in property <bool> checked;
     in property <string> text;
-    in property <string> detail;
     callback clicked();
-    height: layout.preferred-height;
+    height: max(16px, label.preferred-height);
     accessible-role: radio-button;
     accessible-checked: checked;
     accessible-label: text;
-    layout := HorizontalLayout {
-        spacing: 8px;
-        padding-top: 3px;
-        padding-bottom: 3px;
+    HorizontalLayout {
+        spacing: 6px;
         VerticalLayout {
-            alignment: start;
-            padding-top: 1px;
+            alignment: center;
             Rectangle {
-                width: 16px;
-                height: 16px;
-                border-radius: 8px;
-                border-width: root.checked ? 0px : 1px;
-                border-color: Theme.subtext;
-                background: root.checked ? Theme.accent : transparent;
-                animate background { duration: 150ms; }
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: root.checked ? Theme.accent : Theme.subtext;
                 Rectangle {
-                    width: root.checked ? 6px : (touch.has-hover ? 10px : 0px);
-                    height: self.width;
-                    border-radius: self.width / 2;
-                    background: root.checked ? (Theme.dark ? #000000 : #ffffff) : Theme.subtext;
-                    animate width { duration: 160ms; easing: cubic-bezier(0.34, 1.56, 0.64, 1); }
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: Theme.accent;
+                    visible: root.checked;
                 }
             }
         }
-        VerticalLayout {
-            spacing: 1px;
-            Text { text: root.text; color: Theme.text; font-size: 12px; wrap: word-wrap; }
-            if root.detail != "": Text { text: root.detail; color: Theme.subtext; font-size: 11px; wrap: word-wrap; }
+        label := Text {
+            text: root.text;
+            font-size: 12px;
+            color: Theme.text;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
         }
     }
-    touch := TouchArea {
-        mouse-cursor: pointer;
+    TouchArea {
         clicked => { root.clicked(); }
     }
 }
 
-// Progress bar with a smoothly animated fill and an indeterminate sweep.
+// 28 px input box (password / number).
+component InputBox inherits Rectangle {
+    in-out property <string> text;
+    in property <InputType> input-type: InputType.text;
+    // Focus the field whenever its prompt opens.
+    in property <bool> active;
+    callback accepted();
+    forward-focus: input;
+    changed active => {
+        if self.active {
+            input.focus();
+        }
+    }
+    height: 28px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    background: Theme.card;
+    input := TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        text <=> root.text;
+        input-type: root.input-type;
+        font-size: 12px;
+        color: Theme.text;
+        selection-background-color: Theme.accent;
+        selection-foreground-color: #ffffff;
+        vertical-alignment: center;
+        single-line: true;
+        accepted => { root.accepted(); }
+    }
+}
+
+// One prompt body: 20 px margins, content, then 取消 and the primary action on the right.
+component PromptSheet inherits VerticalLayout {
+    in property <string> submit;
+    callback accepted();
+    callback dismissed();
+    x: 0px;
+    y: 0px;
+    height: self.preferred-height;
+    padding: 20px;
+    spacing: 0px;
+    alignment: start;
+    @children
+    HorizontalLayout {
+        padding-top: 16px;
+        spacing: 8px;
+        alignment: end;
+        PushButton {
+            text: "取消";
+            clicked => { root.dismissed(); }
+        }
+        PushButton {
+            text: root.submit;
+            primary: true;
+            clicked => { root.accepted(); }
+        }
+    }
+}
+
+// The classic 12 px bar with an animated fill and an indeterminate sweep.
 component ProgressTrack inherits Rectangle {
     in property <float> value;
     in property <bool> indeterminate;
@@ -144,11 +280,12 @@ component ProgressTrack inherits Rectangle {
         height: root.height;
         border-radius: 2px;
         background: root.fill;
-        animate width { duration: 280ms; easing: cubic-bezier(0.2, 0.8, 0.2, 1); }
-        animate background { duration: 250ms; }
+        animate width { duration: 200ms; easing: ease-out; }
     }
 }
 
+// 92 px stacked area chart: 10×6 grid, translucent tint up to the progress point,
+// solid waveform, speed reference line and label.
 component SpeedGraph inherits Rectangle {
     in property <string> area;
     in property <float> progress;
@@ -157,34 +294,28 @@ component SpeedGraph inherits Rectangle {
     in property <color> fill;
     height: 92px;
     background: Theme.background;
-    border-width: 1px;
-    border-color: Theme.graph-border;
     clip: true;
 
     Rectangle {
         x: 0px;
         width: root.width * clamp(root.progress, 0, 1);
         background: root.fill.with-alpha(0.15);
-        animate width { duration: 280ms; easing: cubic-bezier(0.2, 0.8, 0.2, 1); }
-        animate background { duration: 250ms; }
     }
     Path {
         x: 0px;
         y: 0px;
-        width: 448px;
+        width: root.width;
         height: 92px;
-        viewbox-width: 448;
+        viewbox-width: 446;
         viewbox-height: 92;
         commands: root.area;
         fill: root.fill;
-        animate fill { duration: 250ms; }
     }
     Rectangle {
         x: root.width * clamp(root.progress, 0, 1);
         width: 1px;
         background: root.fill;
         visible: root.progress > 0.001;
-        animate x { duration: 280ms; easing: cubic-bezier(0.2, 0.8, 0.2, 1); }
     }
     for n[i] in 5: Rectangle {
         y: root.height * (i + 1) / 6;
@@ -200,67 +331,41 @@ component SpeedGraph inherits Rectangle {
         y: root.reference-y;
         height: 1px;
         background: Theme.reference;
-        animate y { duration: 300ms; easing: ease-out; }
     }
-    speed := Text {
+    Text {
         text: root.label;
         font-size: 11.5px;
-        color: Theme.text;
+        color: Theme.graph-text;
         x: root.width - self.width - 10px;
         y: root.reference-y - self.height - 2px < 2px ? root.reference-y + 3px : root.reference-y - self.height - 2px;
-        animate y { duration: 300ms; easing: ease-out; }
+    }
+    // 1 px frame on top of everything, like DrawRectangle(bg, borderPen).
+    Rectangle {
+        border-width: 1px;
+        border-color: Theme.graph-border;
     }
 }
 
-component StatusGlyph inherits Rectangle {
-    in property <TaskState> state;
-    property <bool> shown: state == TaskState.done || state == TaskState.failed || state == TaskState.warning;
-    property <color> tone: state == TaskState.done ? Theme.success : state == TaskState.failed ? Theme.danger : Theme.warning;
-    width: shown ? 20px : 0px;
-    height: 20px;
-    animate width { duration: 260ms; easing: cubic-bezier(0.34, 1.56, 0.64, 1); }
-    Rectangle {
-        width: root.shown ? 18px : 4px;
-        height: self.width;
-        border-radius: self.width / 2;
-        background: root.tone;
-        opacity: root.shown ? 1 : 0;
-        animate width { duration: 320ms; easing: cubic-bezier(0.34, 1.56, 0.64, 1); }
-        animate opacity { duration: 200ms; }
-        if root.state == TaskState.done: Path {
-            width: 10px;
-            height: 8px;
-            viewbox-width: 10;
-            viewbox-height: 8;
-            commands: "M 1 4.2 L 3.8 7 L 9 1.2";
-            stroke: Theme.dark ? #000000 : #ffffff;
-            stroke-width: 1.8px;
-            stroke-line-cap: round;
-            fill: transparent;
-        }
-        if root.state != TaskState.done: Text {
-            text: "!";
-            color: Theme.dark ? #000000 : #ffffff;
-            font-size: 13px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-    }
+component DetailRow inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> value;
+    height: 16px;
+    Text { text: root.key; color: Theme.subtext; font-size: 11.5px; vertical-alignment: center; }
+    Text { text: root.value; color: Theme.text; font-size: 11.5px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
 }
 
 export component AppWindow inherits Window {
     // ----- Data pushed from Rust -----
-    in property <string> title-text: "Unbox";
+    in property <string> title-text: "已完成 0%";
     in property <string> path-info: "正在读取压缩包…";
-    in property <string> status-text: "正在打开压缩包…";
+    in property <string> status-text: "已完成 0%";
     in property <TaskState> state: TaskState.running;
     in property <bool> indeterminate: true;
     in property <float> progress;
     in-out property <bool> expanded;
-    in property <string> detail-name: "准备中…";
-    in property <string> detail-eta: "正在计算…";
-    in property <string> detail-remaining: "正在计算…";
+    in property <string> detail-name: "准备中...";
+    in property <string> detail-eta: "正在计算...";
+    in property <string> detail-remaining: "正在计算...";
     in property <string> graph-area;
     in property <float> graph-progress;
     in property <length> graph-reference-y: 88px;
@@ -270,8 +375,10 @@ export component AppWindow inherits Window {
     in property <bool> finished;
     in property <bool> can-open-folder;
     in property <bool> appeared;
+    // Windows 11 rounds the frame (8 px); Windows 10 keeps square corners.
+    in property <bool> rounded: true;
 
-    // ----- Prompt sheet -----
+    // ----- Prompt -----
     in property <PromptKind> prompt: PromptKind.none;
     in property <string> prompt-title;
     in property <string> prompt-submit: "确定";
@@ -285,6 +392,7 @@ export component AppWindow inherits Window {
 
     callback pause-clicked();
     callback cancel-clicked();
+    callback minimize-clicked();
     callback toggle-details();
     callback recycle-toggled(bool);
     callback open-folder();
@@ -292,21 +400,26 @@ export component AppWindow inherits Window {
     callback prompt-accepted();
     callback prompt-dismissed();
 
-    title: root.title-text;
+    title: root.prompt-open ? root.prompt-title : root.title-text;
     icon: @image-url("../../../appicon/package-box.png");
     default-font-family: "Microsoft YaHei UI";
+    no-frame: true;
     background: Theme.background;
 
     property <bool> prompt-open: root.prompt != PromptKind.none;
     property <color> accent: root.state == TaskState.paused ? Theme.paused
-        : root.state == TaskState.failed ? Theme.danger
-        : root.state == TaskState.warning ? Theme.warning
+        : root.state == TaskState.failed ? Theme.red
         : Theme.accent;
-    property <length> wanted-height: root.prompt-open ? max(main.preferred-height, sheet.preferred-height) : main.preferred-height;
+    property <length> chrome: 1px + 30px + 1px;
+    property <length> sheet-height: root.prompt == PromptKind.password ? password-sheet.preferred-height
+        : root.prompt == PromptKind.invalid-names ? names-sheet.preferred-height
+        : root.prompt == PromptKind.encoding ? encoding-sheet.preferred-height
+        : root.prompt == PromptKind.recycle-notice ? recycle-sheet.preferred-height
+        : root.prompt == PromptKind.budget ? budget-sheet.preferred-height
+        : 0px;
+    property <length> wanted-height: root.chrome + max(main.preferred-height, root.sheet-height);
     out property <length> shown-height: root.wanted-height;
-    animate shown-height { duration: 240ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
-    property <float> chevron: root.expanded ? 1 : 0;
-    animate chevron { duration: 220ms; easing: ease-in-out; }
+    animate shown-height { duration: 220ms; easing: ease-in-out; }
 
     min-width: 480px;
     max-width: 480px;
@@ -315,369 +428,453 @@ export component AppWindow inherits Window {
     max-height: root.shown-height;
     preferred-height: root.shown-height;
 
-    // ===================== Main content =====================
-    content := Rectangle {
-        x: 0px;
-        y: root.appeared ? 0px : 8px;
-        width: root.width;
-        height: root.height;
-        opacity: root.prompt-open ? 0 : (root.appeared ? 1 : 0);
-        animate opacity { duration: 220ms; easing: ease-out; }
-        animate y { duration: 320ms; easing: cubic-bezier(0.2, 0.8, 0.2, 1); }
+    // ===================== Frame and title bar =====================
+    frame := Rectangle {
+        border-width: 1px;
+        border-color: Theme.border;
+        border-radius: root.rounded ? 8px : 0px;
+        background: Theme.background;
+        clip: true;
 
-        main := VerticalLayout {
-            x: 0px;
-            y: 0px;
-            width: root.width;
-            padding-left: 16px;
-            padding-right: 16px;
-            padding-top: 10px;
-            padding-bottom: 10px;
-            spacing: 0px;
-            alignment: start;
+        titlebar := Rectangle {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: 30px;
 
-            Text {
-                text: root.path-info;
-                font-size: 12px;
-                color: Theme.text;
-                overflow: elide;
-                height: 18px;
-                vertical-alignment: center;
+            WindowMoveArea {
+                x: 0px;
+                width: parent.width - 3 * 46px;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    spacing: 8px;
+                    alignment: start;
+                    VerticalLayout {
+                        alignment: center;
+                        Path {
+                            width: 14px;
+                            height: 14px;
+                            viewbox-x: 0.4;
+                            viewbox-y: 0.4;
+                            viewbox-width: 15.2;
+                            viewbox-height: 15.2;
+                            commands: "M 8 1 A 7 7 0 1 1 7.99 1 Z M 8 4 L 8 8 L 11 10";
+                            stroke: Theme.subtext;
+                            stroke-width: 1.2px;
+                            fill: transparent;
+                        }
+                    }
+                    Text {
+                        text: root.title;
+                        font-size: 12px;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
             }
 
             HorizontalLayout {
-                height: 34px;
-                spacing: 6px;
-                VerticalLayout {
-                    alignment: center;
-                    StatusGlyph { state: root.state; }
+                x: parent.width - 3 * 46px;
+                width: 3 * 46px;
+                CaptionButton {
+                    tooltip: "最小化";
+                    clicked => { root.minimize-clicked(); }
+                    Rectangle {
+                        width: 10px;
+                        height: 1px;
+                        background: Theme.text;
+                    }
                 }
-                status := Text {
-                    text: root.status-text;
-                    font-size: 18px;
-                    color: root.state == TaskState.failed ? Theme.danger : root.state == TaskState.warning ? Theme.warning : Theme.text;
-                    vertical-alignment: center;
+                CaptionButton {
+                    tooltip: "最大化 (不可用)";
+                    enabled: false;
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-width: 1px;
+                        border-radius: 1px;
+                        border-color: Theme.title-disabled;
+                    }
+                }
+                close := CaptionButton {
+                    tooltip: "关闭";
+                    is-close: true;
+                    clicked => {
+                        if root.prompt-open {
+                            root.prompt-dismissed();
+                        } else {
+                            root.cancel-clicked();
+                        }
+                    }
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        viewbox-width: 10;
+                        viewbox-height: 10;
+                        commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
+                        stroke: close.hovered ? #ffffff : Theme.text;
+                        stroke-width: 1px;
+                        fill: transparent;
+                    }
+                }
+            }
+        }
+
+        // ===================== Main content =====================
+        content := Rectangle {
+            x: 1px;
+            y: 31px;
+            width: parent.width - 2px;
+            height: parent.height - 32px;
+            visible: !root.prompt-open;
+            opacity: root.appeared ? 1 : 0;
+            animate opacity { duration: 180ms; easing: ease-out; }
+
+            main := VerticalLayout {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: 4px;
+                padding-bottom: 6px;
+                spacing: 0px;
+                alignment: start;
+
+                // A. Path line.
+                Text {
+                    text: root.path-info;
+                    font-size: 12px;
+                    color: Theme.text;
                     overflow: elide;
-                    horizontal-stretch: 1;
-                    animate color { duration: 250ms; }
+                    height: 16px;
+                    vertical-alignment: center;
                 }
-                if !root.finished: HorizontalLayout {
-                    alignment: end;
-                    spacing: 4px;
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
-                            tooltip: root.state == TaskState.paused ? "继续" : "暂停";
+                Rectangle { height: 2px; }
+
+                // B. 18 px status with pause / cancel while running.
+                HorizontalLayout {
+                    height: 26px;
+                    Text {
+                        text: root.status-text;
+                        font-size: 18px;
+                        color: root.state == TaskState.warning ? Theme.amber : Theme.text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                    if !root.finished: HorizontalLayout {
+                        spacing: 4px;
+                        FlatIconButton {
+                            tooltip: "暂停/继续";
                             enabled: root.controls-enabled;
                             clicked => { root.pause-clicked(); }
                             if root.state == TaskState.paused: Path {
-                                width: 9px;
-                                height: 10px;
-                                viewbox-width: 9;
-                                viewbox-height: 10;
-                                commands: "M 0.5 0.5 L 8.5 5 L 0.5 9.5 Z";
+                                width: 8px;
+                                height: 9px;
+                                viewbox-width: 8;
+                                viewbox-height: 9;
+                                commands: "M 0 0 L 8 4.5 L 0 9 Z";
                                 fill: Theme.text;
                             }
                             if root.state != TaskState.paused: HorizontalLayout {
                                 alignment: center;
-                                spacing: 3px;
-                                padding-top: 9px;
-                                padding-bottom: 9px;
-                                Rectangle { width: 2.5px; background: Theme.text; border-radius: 1px; }
-                                Rectangle { width: 2.5px; background: Theme.text; border-radius: 1px; }
+                                spacing: 2px;
+                                padding-top: 8px;
+                                padding-bottom: 8px;
+                                Rectangle { width: 3px; background: Theme.text; }
+                                Rectangle { width: 3px; background: Theme.text; }
                             }
                         }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        IconButton {
+                        FlatIconButton {
                             tooltip: "取消";
                             clicked => { root.cancel-clicked(); }
                             Path {
-                                width: 10px;
-                                height: 10px;
+                                width: 9px;
+                                height: 9px;
                                 viewbox-width: 10;
                                 viewbox-height: 10;
                                 commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
                                 stroke: Theme.text;
                                 stroke-width: 1.2px;
-                                stroke-line-cap: round;
                                 fill: transparent;
                             }
                         }
                     }
                 }
-                if root.finished: HorizontalLayout {
-                    alignment: end;
-                    spacing: 8px;
+                Rectangle { height: 3px; }
+
+                // C. Collapsed: 12 px bar (5 px above, 14 px below).
+                Rectangle {
+                    height: root.expanded ? 0px : 31px;
+                    opacity: root.expanded ? 0 : 1;
+                    clip: true;
+                    animate height, opacity { duration: 220ms; easing: ease-in-out; }
+                    ProgressTrack {
+                        y: 5px;
+                        width: parent.width;
+                        value: root.progress;
+                        indeterminate: root.indeterminate;
+                        fill: root.accent;
+                    }
+                }
+
+                // D. Expanded: 92 px graph + 8 px + three detail rows.
+                Rectangle {
+                    height: root.expanded ? 158px : 0px;
+                    opacity: root.expanded ? 1 : 0;
+                    clip: true;
+                    animate height, opacity { duration: 220ms; easing: ease-in-out; }
                     VerticalLayout {
-                        alignment: center;
-                        if root.can-open-folder: AccentButton {
-                            text: "打开文件夹";
-                            accent: Theme.accent;
-                            clicked => { root.open-folder(); }
+                        y: 0px;
+                        height: 158px;
+                        alignment: start;
+                        SpeedGraph {
+                            area: root.graph-area;
+                            progress: root.graph-progress;
+                            reference-y: root.graph-reference-y;
+                            label: root.graph-label;
+                            fill: root.accent;
+                        }
+                        Rectangle { height: 8px; }
+                        DetailRow { key: "名称: "; value: root.detail-name; }
+                        Rectangle { height: 3px; }
+                        DetailRow { key: "剩余时间: "; value: root.detail-eta; }
+                        Rectangle { height: 3px; }
+                        DetailRow { key: "剩余项目: "; value: root.detail-remaining; }
+                    }
+                }
+
+                // E. Bottom bar: details toggle on the left; the recycle option while
+                // running, the finished actions (like a dialog's buttons) when done.
+                Rectangle { height: 8px; }
+                HorizontalLayout {
+                    height: 28px;
+                    Rectangle {
+                        width: toggle.preferred-width;
+                        toggle := HorizontalLayout {
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                Path {
+                                    width: 10px;
+                                    height: 8px;
+                                    viewbox-x: 0.4;
+                                    viewbox-y: 1.4;
+                                    viewbox-width: 9.2;
+                                    viewbox-height: 5.2;
+                                    commands: root.expanded ? "M 1 6 L 5 2 L 9 6" : "M 1 2 L 5 6 L 9 2";
+                                    stroke: Theme.text;
+                                    stroke-width: 1.2px;
+                                    stroke-line-cap: round;
+                                    fill: transparent;
+                                }
+                            }
+                            Text {
+                                text: root.expanded ? "简略信息" : "详细信息";
+                                font-size: 12px;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                            }
+                        }
+                        // The whole row is clickable, like the WPF hyperlink button.
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.toggle-details(); }
                         }
                     }
-                    VerticalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    if !root.finished: VerticalLayout {
                         alignment: center;
-                        AccentButton {
+                        Check {
+                            text: "解压完成后移入回收站";
+                            checked <=> root.recycle-checked;
+                            enabled: root.controls-enabled;
+                            toggled(checked) => { root.recycle-toggled(checked); }
+                        }
+                    }
+                    if root.finished: HorizontalLayout {
+                        spacing: 8px;
+                        if root.can-open-folder: PushButton {
+                            text: "打开所在文件夹";
+                            primary: true;
+                            clicked => { root.open-folder(); }
+                        }
+                        PushButton {
                             text: "关闭";
-                            primary: !root.can-open-folder;
-                            accent: root.state == TaskState.failed ? Theme.danger : Theme.accent;
                             clicked => { root.close-clicked(); }
                         }
                     }
                 }
             }
 
-            // Collapsed view: the classic 12 px bar.
-            Rectangle {
-                height: root.expanded ? 0px : 30px;
-                opacity: root.expanded ? 0 : 1;
-                clip: true;
-                animate height { duration: 220ms; easing: ease-in-out; }
-                animate opacity { duration: 180ms; }
-                ProgressTrack {
-                    y: 5px;
-                    width: parent.width;
-                    value: root.progress;
-                    indeterminate: root.indeterminate;
-                    fill: root.accent;
-                }
-            }
-
-            // Expanded view: throughput graph and three detail rows.
-            Rectangle {
-                height: root.expanded ? 164px : 0px;
-                opacity: root.expanded ? 1 : 0;
-                clip: true;
-                animate height { duration: 220ms; easing: ease-in-out; }
-                animate opacity { duration: 220ms; easing: ease-in; }
-                VerticalLayout {
-                    y: 4px;
-                    height: 160px;
-                    spacing: 4px;
-                    SpeedGraph {
-                        area: root.graph-area;
-                        progress: root.graph-progress;
-                        reference-y: root.graph-reference-y;
-                        label: root.graph-label;
-                        fill: root.accent;
-                    }
-                    Rectangle { height: 4px; }
-                    for row in [
-                        { k: "名称：", v: root.detail-name },
-                        { k: "剩余时间：", v: root.detail-eta },
-                        { k: "剩余项目：", v: root.detail-remaining },
-                    ]: HorizontalLayout {
-                        height: 18px;
-                        Text { text: row.k; color: Theme.subtext; font-size: 12px; vertical-alignment: center; }
-                        Text { text: row.v; color: Theme.text; font-size: 12px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
-                    }
-                }
-            }
-
-            // Bottom bar: details toggle and recycle option.
-            HorizontalLayout {
-                height: 30px;
-                padding-top: 4px;
-                Rectangle {
-                    width: toggle-row.preferred-width + 12px;
-                    border-radius: 4px;
-                    background: toggle-touch.pressed ? Theme.pressed : toggle-touch.has-hover ? Theme.hover : transparent;
-                    animate background { duration: 120ms; }
-                    toggle-row := HorizontalLayout {
-                        x: 6px;
-                        spacing: 8px;
-                        alignment: start;
-                        VerticalLayout {
-                            alignment: center;
-                            Path {
-                                width: 10px;
-                                height: 8px;
-                                viewbox-width: 10;
-                                viewbox-height: 8;
-                                commands: "M 1 \{2 + 4 * root.chevron} L 5 \{6 - 4 * root.chevron} L 9 \{2 + 4 * root.chevron}";
-                                stroke: Theme.text;
-                                stroke-width: 1.2px;
-                                stroke-line-cap: round;
-                                fill: transparent;
-                            }
-                        }
-                        Text {
-                            text: root.expanded ? "简略信息" : "详细信息";
-                            font-size: 12px;
-                            color: Theme.text;
-                            vertical-alignment: center;
-                        }
-                    }
-                    toggle-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.toggle-details(); }
-                    }
-                }
-                Rectangle { horizontal-stretch: 1; }
-                CheckBox {
-                    text: "解压完成后移入回收站";
-                    checked <=> root.recycle-checked;
-                    enabled: root.controls-enabled;
-                    toggled => { root.recycle-toggled(self.checked); }
-                }
-            }
         }
-    }
 
-    // ===================== Prompt sheet =====================
-    if root.prompt-open: TouchArea {
-        // Swallow clicks meant for the hidden main content.
-        x: 0px;
-        y: 0px;
-        width: root.width;
-        height: root.height;
-    }
-    sheet-host := Rectangle {
-        x: 0px;
-        y: root.prompt-open ? 0px : 16px;
-        width: root.width;
-        height: root.height;
-        opacity: root.prompt-open ? 1 : 0;
-        visible: self.opacity > 0.01;
-        animate y { duration: 260ms; easing: cubic-bezier(0.2, 0.8, 0.2, 1); }
-        animate opacity { duration: 200ms; easing: ease-out; }
+        // ===================== Prompts (the 1.x dialog bodies, shown in place) =====================
+        // Every prompt is its own always-present layout so each one keeps an up-to-date
+        // preferred height; only the active one is visible.
+        prompt-host := Rectangle {
+            x: 1px;
+            y: 31px;
+            width: parent.width - 2px;
+            height: parent.height - 32px;
+            visible: root.prompt-open;
 
-        sheet := VerticalLayout {
-            x: 0px;
-            y: 0px;
-            width: root.width;
-            spacing: 0px;
-            alignment: start;
-
-            VerticalLayout {
-                padding: 20px;
-                padding-bottom: 16px;
-                spacing: 10px;
-                Text {
-                    text: root.prompt-title;
-                    font-size: 18px;
-                    font-weight: 600;
-                    color: Theme.text;
-                }
-
-                if root.prompt == PromptKind.password: VerticalLayout {
+            password-sheet := PromptSheet {
+                width: parent.width;
+                visible: root.prompt == PromptKind.password;
+                submit: root.prompt-submit;
+                accepted => { root.prompt-accepted(); }
+                dismissed => { root.prompt-dismissed(); }
+                VerticalLayout {
                     spacing: 8px;
+                    padding-bottom: 16px;
                     Text { text: "此压缩包受密码保护，请输入解压密码："; font-size: 12px; color: Theme.text; wrap: word-wrap; }
-                    LineEdit {
+                    InputBox {
+                        active: root.prompt == PromptKind.password;
                         input-type: password;
-                        placeholder-text: "密码";
                         text <=> root.prompt-input;
                         accepted => { root.prompt-accepted(); }
-                        init => { self.focus(); }
                     }
                 }
+            }
 
-                if root.prompt == PromptKind.invalid-names: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: "压缩包内包含 Windows 不支持的字符或保留名称："; font-size: 12px; color: Theme.text; wrap: word-wrap; }
-                    Rectangle {
-                        height: min(names.preferred-height + 12px, 96px);
-                        background: Theme.card;
-                        border-color: Theme.border;
-                        border-width: 1px;
-                        border-radius: 4px;
-                        ScrollView {
-                            names := VerticalLayout {
-                                padding: 6px;
-                                spacing: 2px;
-                                for line in root.invalid-names: Text { text: line; font-size: 11px; color: Theme.subtext; wrap: word-wrap; }
-                            }
+            names-sheet := PromptSheet {
+                width: parent.width;
+                visible: root.prompt == PromptKind.invalid-names;
+                submit: root.prompt-submit;
+                accepted => { root.prompt-accepted(); }
+                dismissed => { root.prompt-dismissed(); }
+                Text { text: "压缩包内包含 Windows 不支持的非法字符或保留名称："; font-size: 12px; color: Theme.text; wrap: word-wrap; }
+                Rectangle { height: 8px; }
+                Rectangle {
+                    height: min(names.preferred-height, 80px);
+                    background: Theme.card;
+                    border-color: Theme.border;
+                    border-width: 1px;
+                    border-radius: 4px;
+                    ScrollView {
+                        names := VerticalLayout {
+                            padding: 6px;
+                            spacing: 2px;
+                            for line in root.invalid-names: Text { text: line; font-size: 11px; color: Theme.subtext; wrap: word-wrap; }
                         }
                     }
-                    Radio {
-                        text: "批量重命名：将非法字符替换为 “-”（推荐）";
-                        checked: root.prompt-choice == 0;
-                        clicked => { root.prompt-choice = 0; }
-                    }
-                    Radio {
-                        text: "仅提取可表示的文件（跳过这些项，源包将保留）";
-                        checked: root.prompt-choice == 1;
-                        clicked => { root.prompt-choice = 1; }
-                    }
-                    CheckBox { text: "记住我的选择，以后不再询问"; checked <=> root.prompt-remember; }
                 }
+                Rectangle { height: 10px; }
+                Radio {
+                    text: "批量重命名：将非法字符全部替换为 \"-\" (默认)";
+                    checked: root.prompt-choice == 0;
+                    clicked => { root.prompt-choice = 0; }
+                }
+                Rectangle { height: 6px; }
+                Radio {
+                    text: "仅提取可表示的文件（跳过该项，源包将保留）";
+                    checked: root.prompt-choice == 1;
+                    clicked => { root.prompt-choice = 1; }
+                }
+                Rectangle { height: 12px; }
+                Check {
+                    text: "记住我的选择，以后不再询问";
+                    font-size: 11px;
+                    text-color: Theme.subtext;
+                    checked <=> root.prompt-remember;
+                }
+                Rectangle { height: 14px; }
+            }
 
-                if root.prompt == PromptKind.encoding: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: "文件名缺少可靠的编码声明，请选择能正确显示文件名的编码："; font-size: 12px; color: Theme.text; wrap: word-wrap; }
-                    Rectangle {
-                        height: min(choices.preferred-height + 12px, 170px);
-                        background: Theme.card;
-                        border-color: Theme.border;
-                        border-width: 1px;
-                        border-radius: 4px;
-                        ScrollView {
-                            choices := VerticalLayout {
-                                padding: 8px;
-                                spacing: 2px;
-                                for choice[i] in root.encodings: Radio {
+            encoding-sheet := PromptSheet {
+                width: parent.width;
+                visible: root.prompt == PromptKind.encoding;
+                submit: root.prompt-submit;
+                accepted => { root.prompt-accepted(); }
+                dismissed => { root.prompt-dismissed(); }
+                Text { text: "压缩包内的文件名缺少可靠的编码声明，请选择能正确显示文件名的解码方式："; font-size: 12px; color: Theme.text; wrap: word-wrap; }
+                Rectangle { height: 8px; }
+                Rectangle {
+                    height: min(choices.preferred-height, 150px);
+                    background: Theme.card;
+                    border-color: Theme.border;
+                    border-width: 1px;
+                    border-radius: 4px;
+                    ScrollView {
+                        choices := VerticalLayout {
+                            padding: 8px;
+                            padding-bottom: 4px;
+                            spacing: 0px;
+                            for choice[i] in root.encodings: VerticalLayout {
+                                padding-bottom: choice.samples == "" ? 4px : 8px;
+                                Radio {
                                     text: choice.label;
-                                    detail: choice.samples;
                                     checked: root.prompt-choice == i;
                                     clicked => { root.prompt-choice = i; }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 20px;
+                                    height: choice.samples == "" ? 0px : 15px;
+                                    Text {
+                                        text: choice.samples;
+                                        font-size: 11px;
+                                        color: Theme.subtext;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                         }
                     }
-                    CheckBox { text: "记住我的选择，以后不再询问"; checked <=> root.prompt-remember; }
                 }
+                Rectangle { height: 10px; }
+                Check {
+                    text: "记住我的选择，以后遇到同类压缩包不再询问";
+                    font-size: 11px;
+                    text-color: Theme.subtext;
+                    checked <=> root.prompt-remember;
+                }
+                Rectangle { height: 14px; }
+            }
 
-                if root.prompt == PromptKind.recycle-notice: Text {
+            recycle-sheet := PromptSheet {
+                width: parent.width;
+                visible: root.prompt == PromptKind.recycle-notice;
+                submit: root.prompt-submit;
+                accepted => { root.prompt-accepted(); }
+                dismissed => { root.prompt-dismissed(); }
+                Text {
                     text: "解压并逐项校验成功后，源压缩包会移入回收站。分卷压缩包会整组移入；TAR 等缺少内容校验的格式会在回收前额外核对摘要。";
                     font-size: 12px;
                     color: Theme.text;
                     wrap: word-wrap;
                 }
-
-                if root.prompt == PromptKind.budget: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: root.prompt-detail; font-size: 12px; color: Theme.text; wrap: word-wrap; }
-                    Text { text: "本次解压上限（MiB）"; font-size: 12px; color: Theme.subtext; }
-                    LineEdit {
-                        input-type: number;
-                        text <=> root.prompt-input;
-                        accepted => { root.prompt-accepted(); }
-                        init => { self.focus(); }
-                    }
-                    if root.prompt-error != "": Text { text: root.prompt-error; font-size: 12px; color: Theme.danger; wrap: word-wrap; }
-                }
+                Rectangle { height: 16px; }
             }
 
-            Rectangle {
-                height: 64px;
-                background: Theme.footer;
-                Rectangle { y: 0px; height: 1px; background: Theme.border; }
-                HorizontalLayout {
-                    padding-left: 20px;
-                    padding-right: 20px;
-                    spacing: 8px;
-                    alignment: end;
-                    VerticalLayout {
-                        alignment: center;
-                        AccentButton {
-                            width: 110px;
-                            text: root.prompt-submit;
-                            clicked => { root.prompt-accepted(); }
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        AccentButton {
-                            width: 110px;
-                            text: "取消";
-                            primary: false;
-                            clicked => { root.prompt-dismissed(); }
-                        }
-                    }
+            budget-sheet := PromptSheet {
+                width: parent.width;
+                visible: root.prompt == PromptKind.budget;
+                submit: root.prompt-submit;
+                accepted => { root.prompt-accepted(); }
+                dismissed => { root.prompt-dismissed(); }
+                Text { text: root.prompt-detail; font-size: 12px; color: Theme.text; wrap: word-wrap; }
+                Rectangle { height: 12px; }
+                Text { text: "本次解压上限（MiB）"; font-size: 12px; color: Theme.text; }
+                Rectangle { height: 4px; }
+                InputBox {
+                    active: root.prompt == PromptKind.budget;
+                    input-type: number;
+                    text <=> root.prompt-input;
+                    accepted => { root.prompt-accepted(); }
                 }
+                Text {
+                    height: root.prompt-error == "" ? 0px : self.preferred-height + 8px;
+                    vertical-alignment: bottom;
+                    text: root.prompt-error;
+                    font-size: 12px;
+                    color: Theme.red;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 8px; }
             }
         }
     }
