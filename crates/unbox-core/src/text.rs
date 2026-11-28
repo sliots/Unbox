@@ -14,18 +14,30 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// A remaining time as people say it: coarser the further away it is, so the text
+/// does not tick every second (under a minute in 5 s steps, under ten minutes in 10 s
+/// steps, then whole minutes).
 pub fn format_duration(seconds: f64) -> String {
     if seconds < 5.0 {
         return "几秒钟".into();
     }
+    let up_to = |value: f64, step: u64| ((value / step as f64).ceil() as u64) * step;
     if seconds < 60.0 {
-        return format!("{} 秒", seconds.ceil() as u64);
+        let s = up_to(seconds, 5);
+        return if s >= 60 { "1 分钟".into() } else { format!("{s} 秒") };
     }
-    let total = seconds as u64;
-    if total < 3600 {
-        return format!("{} 分 {} 秒", total / 60, total % 60);
+    if seconds < 600.0 {
+        let total = up_to(seconds, 10);
+        return match total % 60 {
+            0 => format!("{} 分钟", total / 60),
+            s => format!("{} 分 {s} 秒", total / 60),
+        };
     }
-    format!("{} 小时 {} 分钟", total / 3600, (total % 3600) / 60)
+    let minutes = up_to(seconds, 60) / 60;
+    if minutes < 60 {
+        return format!("{minutes} 分钟");
+    }
+    format!("{} 小时 {} 分钟", minutes / 60, minutes % 60)
 }
 
 pub fn format_speed(mbps: f64) -> String {
@@ -68,9 +80,13 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(3 << 30), "3.0 GB");
         assert_eq!(format_duration(3.0), "几秒钟");
-        assert_eq!(format_duration(42.2), "43 秒");
-        assert_eq!(format_duration(125.0), "2 分 5 秒");
-        assert_eq!(format_duration(7300.0), "2 小时 1 分钟");
+        assert_eq!(format_duration(42.2), "45 秒");
+        assert_eq!(format_duration(41.0), "45 秒");
+        assert_eq!(format_duration(57.0), "1 分钟");
+        assert_eq!(format_duration(125.0), "2 分 10 秒");
+        assert_eq!(format_duration(175.0), "3 分钟");
+        assert_eq!(format_duration(1234.0), "21 分钟");
+        assert_eq!(format_duration(7300.0), "2 小时 2 分钟");
         assert_eq!(format_speed(3.21), "3.2 MB/秒");
         assert_eq!(format_speed(123.4), "123 MB/秒");
     }

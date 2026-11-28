@@ -51,6 +51,55 @@ impl SpeedMeter {
     }
 }
 
+/// Seconds for the remaining-time estimate to take in a change of speed.
+const ETA_SETTLE: f64 = 4.0;
+/// The shown remaining time changes at most this often (seconds).
+const ETA_REFRESH: f64 = 1.0;
+
+/// Remaining time that counts down steadily instead of following every swing of the
+/// speed: between reports the estimate runs down with the clock, and a new speed only
+/// pulls it gradually toward the new figure.
+#[derive(Debug, Default)]
+pub struct EtaEstimator {
+    estimate: Option<f64>,
+    last: f64,
+    shown: f64,
+    shown_at: f64,
+}
+
+impl EtaEstimator {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Resume after a pause: the paused time does not count down the estimate.
+    pub fn rebase(&mut self, now: f64) {
+        self.last = now;
+        self.shown_at = now;
+    }
+
+    /// `raw`: remaining work divided by the current speed, in seconds. Returns the
+    /// seconds to show.
+    pub fn update(&mut self, now: f64, raw: f64) -> f64 {
+        let estimate = match self.estimate {
+            None => raw,
+            Some(previous) => {
+                let elapsed = (now - self.last).max(0.0);
+                let predicted = (previous - elapsed).max(0.0);
+                predicted + (raw - predicted) * (1.0 - (-elapsed / ETA_SETTLE).exp())
+            }
+        };
+        let first = self.estimate.is_none();
+        self.estimate = Some(estimate);
+        self.last = now;
+        if first || now - self.shown_at >= ETA_REFRESH {
+            self.shown = estimate;
+            self.shown_at = now;
+        }
+        self.shown
+    }
+}
+
 const BUCKETS: usize = 120;
 
 /// Horizontal "stacked area" graph: x is overall progress, y is throughput. Each
@@ -205,6 +254,29 @@ mod tests {
         // The scale never shrinks back.
         g.push(0.7, 5.0, 5.0);
         assert_eq!(g.max_scale, 2600.0);
+    }
+
+    #[test]
+    fn eta_counts_down_through_speed_swings() {
+        let mut eta = EtaEstimator::default();
+        let mut shown = Vec::new();
+        let mut t = 0.0;
+        // 100 s of work at an average of 1 unit/s, reported every 100 ms with ±40% noise.
+        let mut remaining = 100.0;
+        let mut seed = 7u64;
+        while remaining > 10.0 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let noise = 0.6 + 0.8 * ((seed >> 33) as f64 / (1u64 << 31) as f64);
+            t += 0.1;
+            remaining -= 0.1;
+            shown.push(eta.update(t, remaining / noise));
+        }
+        // The shown value changes at most once a second…
+        let changes = shown.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(changes <= (t as usize) + 1, "{changes} changes in {t} s");
+        // …and each change stays close to a steady countdown.
+        let jumps = shown.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f64::max);
+        assert!(jumps < 8.0, "jump of {jumps} s");
     }
 
     #[test]

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use unbox_core::ipc::*;
 use unbox_core::manifest::Manifest;
-use unbox_core::progress::{SpeedGraph, SpeedMeter};
+use unbox_core::progress::{EtaEstimator, SpeedGraph, SpeedMeter};
 use unbox_core::settings::UserSettings;
 use unbox_core::text::{describe_failure, format_bytes, format_duration, format_speed};
 
@@ -210,6 +210,7 @@ struct Controller {
     spread: Vec<String>,
     started: Instant,
     meter: SpeedMeter,
+    eta: EtaEstimator,
     graph: SpeedGraph,
     prompt: PromptCtx,
 }
@@ -426,6 +427,7 @@ impl Controller {
                 if self.phase != Some((phase, layer)) {
                     self.phase = Some((phase, layer));
                     self.meter.reset(self.now(), 0);
+                    self.eta.reset();
                 }
                 self.volume = (volume, volumes);
                 self.completed_bytes = completed_bytes;
@@ -540,7 +542,8 @@ impl Controller {
         let eta = if progress >= 1.0 || remaining == 0 {
             "完成".to_string()
         } else if self.meter.current > 0.1 {
-            format!("大约 {}", format_duration(remaining as f64 / MIB as f64 / self.meter.current))
+            let seconds = self.eta.update(self.now(), remaining as f64 / MIB as f64 / self.meter.current);
+            format!("大约 {}", format_duration(seconds))
         } else if progress > 0.01 {
             "大约 几秒钟".to_string()
         } else {
@@ -570,6 +573,7 @@ impl Controller {
         } else {
             let now = self.now();
             self.meter.rebase(now, self.completed_bytes);
+            self.eta.rebase(now);
             self.update_progress(None);
             self.send(WorkerCommand::Resume);
         }
@@ -912,6 +916,7 @@ impl Controller {
         self.total_bytes = 0;
         self.completed_bytes = 0;
         self.graph = SpeedGraph::default();
+        self.eta.reset();
         self.started = Instant::now();
         self.meter.reset(0.0, 0);
         let ui = self.ui();
@@ -1073,6 +1078,7 @@ impl Controller {
         self.volume = (0, 0);
         self.spread.clear();
         self.meter = SpeedMeter::default();
+        self.eta.reset();
         self.graph = SpeedGraph::default();
         self.prompt = PromptCtx::None;
         self.wants_attention = false;
@@ -1468,6 +1474,7 @@ fn run_window(job: Job, accepting: bool) -> i32 {
         spread: Vec::new(),
         started: Instant::now(),
         meter: SpeedMeter::default(),
+        eta: EtaEstimator::default(),
         graph: SpeedGraph::default(),
         prompt: PromptCtx::None,
         shown: false,
