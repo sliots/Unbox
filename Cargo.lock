@@ -4598,7 +4598,7 @@ dependencies = [
 
 [[package]]
 name = "unbox"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "crc32fast",
  "ico",
@@ -4621,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "unbox-core"
-version = "2.0.10"
+version = "2.0.11"
 dependencies = [
  "crc32fast",
  "serde",

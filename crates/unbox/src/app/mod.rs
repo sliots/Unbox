@@ -992,10 +992,12 @@ impl Controller {
                     ui.set_path_info(format!("解压已完成并已逐项校验。{}。{tail}", r.message).into());
                     ui.set_can_copy_details(true);
                     self.reveal();
-                    std::thread::spawn(|| {
-                        effects::play_finished_sound();
-                        post(Msg::SoundDone(false));
-                    });
+                    if self.settings.play_sound {
+                        std::thread::spawn(|| {
+                            effects::play_finished_sound();
+                            post(Msg::SoundDone(false));
+                        });
+                    }
                 } else {
                     ui.set_state(TaskState::Done);
                     self.set_status("已完成 100%");
@@ -1012,7 +1014,7 @@ impl Controller {
                     }
                     // Last one: take no more archives (a latecomer opens its own window).
                     self.accepting = false;
-                    if self.shown {
+                    if self.shown && self.settings.play_sound {
                         // Done: the window goes away at once; the chime plays out after it.
                         let _ = ui.hide();
                         std::thread::spawn(|| {
@@ -1020,7 +1022,7 @@ impl Controller {
                             post(Msg::SoundDone(true));
                         });
                     } else {
-                        // Finished before the window was due: nothing to show.
+                        // Silent by default: nothing left to show or play.
                         let _ = slint::quit_event_loop();
                     }
                 }

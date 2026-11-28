@@ -16,6 +16,8 @@ pub struct UserSettings {
     /// 0 means automatic (system ANSI code page).
     pub archive_code_page: u32,
     pub remember_archive_code_page: bool,
+    /// Play the chime when an extraction finishes (off unless turned on).
+    pub play_sound: bool,
 }
 
 impl Default for UserSettings {
@@ -27,6 +29,7 @@ impl Default for UserSettings {
             is_details_expanded: false,
             archive_code_page: 0,
             remember_archive_code_page: false,
+            play_sound: false,
         }
     }
 }
@@ -80,6 +83,7 @@ mod tests {
         let legacy = r#"{ "RecycleOnSuccess": true, "InvalidCharsAction": "skip", "RememberInvalidCharsAction": true, "IsDetailsExpanded": true, "ArchiveCodePage": 936, "RememberArchiveCodePage": false }"#;
         let s: UserSettings = serde_json::from_str(legacy).unwrap();
         assert!(s.recycle_on_success && s.is_details_expanded);
+        assert!(!s.play_sound, "the chime is off unless turned on");
         assert_eq!(s.remembered_invalid_action(), Some(InvalidCharsAction::Skip));
         let partial: UserSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(partial, UserSettings::default());
